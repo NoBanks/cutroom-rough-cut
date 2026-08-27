@@ -19,7 +19,12 @@ document.addEventListener('DOMContentLoaded', () => {
     logText: document.querySelector('.log-text'),
     inventoryLog: document.getElementById('inventory-log'),
     inventoryWarnings: document.getElementById('inventory-warnings'),
-    crewLog: document.getElementById('crew-log')
+    crewLog: document.getElementById('crew-log'),
+    selectorLog: document.getElementById('selector-log'),
+    momentCount: document.getElementById('moment-count'),
+    momentTableBody: document.getElementById('moment-table-body'),
+    momentEmpty: document.getElementById('moment-empty'),
+    assemblyMessage: document.getElementById('assembly-message')
   };
 
   // --- Constants ---
@@ -104,6 +109,57 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.crewLog.textContent = status
       ? `[CREW] ${status}`
       : (error ? `[CREW] ${error}` : '');
+  }
+
+  function renderSelector(data) {
+    const logs = Array.isArray(data?.selectorLog) ? data.selectorLog : [];
+    elements.selectorLog.replaceChildren();
+    logs.slice(-12).forEach(log => {
+      const line = document.createElement('div');
+      line.className = 'selector-line';
+      line.textContent = log;
+      elements.selectorLog.appendChild(line);
+    });
+
+    const moments = Array.isArray(data?.moments) ? data.moments : [];
+    elements.momentCount.textContent = `${moments.length} ${moments.length === 1 ? 'moment' : 'moments'}`;
+    elements.momentTableBody.replaceChildren();
+    moments.forEach(moment => {
+      const row = document.createElement('tr');
+      const values = [
+        moment.filename || moment.clip_id || 'unknown',
+        `${formatDuration(moment.start_sec)} → ${formatDuration(moment.end_sec)}`,
+        moment.action || '—',
+        [moment.shot_size, moment.camera_motion].filter(Boolean).join(' · ') || '—',
+        Number.isFinite(Number(moment.intent_score))
+          ? `${Math.round(Number(moment.intent_score) * 100)}%`
+          : '—',
+        moment.notes || '—'
+      ];
+      values.forEach(value => {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+      elements.momentTableBody.appendChild(row);
+    });
+    elements.momentEmpty.hidden = moments.length > 0;
+  }
+
+  function renderAssemblyMessage(data) {
+    if (data?.status === 'completed') {
+      elements.assemblyMessage.textContent = 'Selector complete. Your moment inventory is ready.';
+      elements.assemblyMessage.classList.remove('blink');
+      elements.assemblyMessage.style.color = 'var(--amber)';
+    } else if (data?.status === 'error') {
+      elements.assemblyMessage.textContent = data.selectorError || 'Selector finished with errors.';
+      elements.assemblyMessage.classList.remove('blink');
+      elements.assemblyMessage.style.color = 'var(--error)';
+    } else {
+      elements.assemblyMessage.textContent = 'The crew is assembling...';
+      elements.assemblyMessage.classList.add('blink');
+      elements.assemblyMessage.style.color = '';
+    }
   }
 
   // --- Landing State Handlers ---
@@ -290,6 +346,8 @@ document.addEventListener('DOMContentLoaded', () => {
        const data = await res.json();
        renderInventory(data.inventory, data.inventoryErrors);
        renderCrewStatus(data.crewStatus, data.crewStatusError);
+        renderSelector(data);
+        renderAssemblyMessage(data);
        switchState('assembly');
       startStatusPolling();
     } catch (err) {
@@ -312,13 +370,20 @@ document.addEventListener('DOMContentLoaded', () => {
           const data = await res.json();
           if (data.status === 'completed') {
             clearInterval(pollInterval);
-            elements.logText.textContent = 'Assembly complete. Your rough cut is ready.';
-            elements.logText.classList.remove('blink');
+             renderSelector(data);
+             renderAssemblyMessage(data);
+             elements.logText.textContent = 'Assembly complete. Your moment inventory is ready.';
+             elements.logText.classList.remove('blink');
           } else if (data.status === 'error') {
             clearInterval(pollInterval);
-            elements.logText.textContent = 'Error during assembly: ' + (data.error || 'Unknown error');
+             renderSelector(data);
+             renderAssemblyMessage(data);
+             elements.logText.textContent = 'Selector finished with errors. Review the log above.';
             elements.logText.classList.remove('blink');
             elements.logText.style.color = 'var(--error)';
+           } else {
+             renderSelector(data);
+             renderAssemblyMessage(data);
           }
         }
       } catch (err) {
@@ -337,6 +402,8 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionStorage.setItem('cutroom_session_id', sessionId);
         renderInventory(data.inventory, data.inventoryErrors);
         renderCrewStatus(data.crewStatus, data.crewStatusError);
+        renderSelector(data);
+        renderAssemblyMessage(data);
         if (data.status === 'assembling') {
           switchState('assembly');
           startStatusPolling();

@@ -74,7 +74,7 @@ export async function generateJSON(systemPrompt, userContent, schemaHint) {
   try {
     return await requestJSON(PRIMARY_MODEL, systemPrompt, userContent, schemaHint);
   } catch (firstError) {
-    if (!isTransientError(firstError)) throw cleanError();
+    if (!isTransientError(firstError)) throw cleanError(firstError);
     try {
       return await requestJSON(
         PRIMARY_MODEL,
@@ -82,7 +82,7 @@ export async function generateJSON(systemPrompt, userContent, schemaHint) {
         userContent,
         schemaHint,
       );
-    } catch {
+    } catch (secondError) {
       try {
         return await requestJSON(
           FALLBACK_MODEL,
@@ -90,11 +90,10 @@ export async function generateJSON(systemPrompt, userContent, schemaHint) {
           userContent,
           schemaHint,
         );
-      } catch {
-        throw cleanError();
+      } catch (thirdError) {
+        throw cleanError(thirdError);
       }
     }
-    throw cleanError();
   }
 }
 
@@ -108,7 +107,13 @@ export async function uploadVideo(filePath) {
       config: { mimeType },
     });
     for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt += 1) {
-      if (file.state === "ACTIVE") return file;
+      if (file.state === "ACTIVE") {
+        Object.defineProperty(file, FILE_CLIENT, {
+          value: ai,
+          enumerable: false,
+        });
+        return file;
+      }
       if (file.state === "FAILED" || !file.name) {
         throw new Error("Gemini video processing failed.");
       }
@@ -116,8 +121,11 @@ export async function uploadVideo(filePath) {
       file = await ai.files.get({ name: file.name });
     }
     throw new Error("Gemini video processing timed out.");
-  } catch {
-    throw new Error("Gemini video upload failed.");
+  } catch (error) {
+    const wrapped = new Error("Gemini video upload failed.");
+    const status = Number(error?.status ?? error?.code);
+    if (Number.isFinite(status)) wrapped.status = status;
+    throw wrapped;
   }
 }
 
@@ -132,17 +140,25 @@ export async function generateJSONWithVideo(
   systemPrompt,
   filePart,
   schemaHint,
+  userPayload = "Analyze the uploaded video and return the requested JSON.",
 ) {
   const contents = [
     {
       role: "user",
       parts: [
-        { text: "Analyze the uploaded video and return the requested JSON." },
+        { text: userPayload },
         { fileData: fileData(filePart) },
       ],
     },
   ];
-  return generateJSON(systemPrompt, contents, schemaHint);
+  const uploadClient = filePart?.[FILE_CLIENT];
+  return requestJSON(
+    PRIMARY_MODEL,
+    systemPrompt,
+    contents,
+    schemaHint,
+    uploadClient ?? client(),
+  );
 }
 
 export async function getGeminiHealth() {

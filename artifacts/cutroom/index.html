@@ -65,6 +65,29 @@
           <div id="inventory-log" class="inventory-log"></div>
           <div id="inventory-warnings" class="inventory-warnings" aria-live="polite"></div>
           <div id="crew-log" class="crew-log"></div>
+          <div id="selector-log" class="selector-log" aria-live="polite"></div>
+          <div class="moment-inventory">
+            <div class="moment-heading">
+              <h2>Moment inventory</h2>
+              <span id="moment-count" class="moment-count"></span>
+            </div>
+            <div class="moment-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Clip</th>
+                    <th>In / out</th>
+                    <th>Action</th>
+                    <th>Shot</th>
+                    <th>Score</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody id="moment-table-body"></tbody>
+              </table>
+              <p id="moment-empty" class="moment-empty">No selects yet.</p>
+            </div>
+          </div>
           <p id="assembly-message" class="log-text blink">The crew is assembling...</p>
         </div>
       </div>

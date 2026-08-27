@@ -301,6 +301,100 @@ textarea::placeholder {
   margin-bottom: 1rem;
 }
 
+.selector-log {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.55;
+  margin-bottom: 1.75rem;
+  max-height: 12rem;
+  overflow: hidden;
+}
+
+.selector-line {
+  border-top: 1px solid #292929;
+  padding: 0.35rem 0;
+}
+
+.moment-inventory {
+  border-top: 1px solid #333;
+  padding-top: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.moment-heading {
+  align-items: baseline;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.8rem;
+}
+
+.moment-heading h2 {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.moment-count,
+.moment-empty {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.moment-table-wrap {
+  overflow-x: auto;
+}
+
+.moment-table-wrap table {
+  border-collapse: collapse;
+  min-width: 720px;
+  width: 100%;
+}
+
+.moment-table-wrap th,
+.moment-table-wrap td {
+  border-bottom: 1px solid #292929;
+  padding: 0.65rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.moment-table-wrap th {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.moment-table-wrap td {
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.moment-table-wrap td:nth-child(1),
+.moment-table-wrap td:nth-child(2),
+.moment-table-wrap td:nth-child(5) {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.moment-empty {
+  padding: 0.8rem 0;
+}
+
+.moment-empty[hidden] {
+  display: none;
+}
+
 .log-text {
   font-family: var(--font-mono);
   color: var(--amber);
@@ -360,5 +454,11 @@ textarea::placeholder {
   
   .dropzone {
     padding: 2.5rem 1rem;
+  }
+
+  .moment-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
   }
 }

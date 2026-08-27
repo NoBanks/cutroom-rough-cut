@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { Router, type Request, type Response } from "express";
@@ -50,19 +51,64 @@ interface RejectedClip {
   reason: string;
 }
 
+interface SelectorClipState {
+  clip_id: string;
+  filename: string;
+  state: "queued" | "uploading" | "analyzing" | "retrying" | "complete" | "error";
+  attempt: number;
+  message?: string;
+  moments?: number;
+}
+
+interface SelectorMoment {
+  clip_id: string;
+  filename: string;
+  start_sec: number;
+  end_sec: number;
+  action: string;
+  shot_size: string;
+  camera_motion: string;
+  subject_motion: string;
+  audio_event: string;
+  intent_score: number;
+  look_for_hits: string[];
+  dead_shot: boolean;
+  notes: string;
+}
+
+interface SelectorResult {
+  generated_at: string;
+  intent: Record<string, unknown>;
+  clips: Array<{
+    clip_id: string;
+    filename: string;
+    quality_flags: string[];
+    moments: SelectorMoment[];
+  }>;
+  moments: SelectorMoment[];
+  errors: string[];
+  partial: boolean;
+}
+
 interface SessionState {
   id: string;
   dir: string;
   clips: Clip[];
   brief: string;
   preset: string;
-  status: "intake" | "assembling";
+  status: "intake" | "assembling" | "completed" | "error";
   inventory: InventoryClip[];
   inventoryErrors: string[];
   totalRuntimeSeconds: number;
   crewStatusAttempted: boolean;
   crewStatus?: string;
   crewStatusError?: string;
+  selectorStatus: "idle" | "running" | "complete" | "error";
+  selectorLog: string[];
+  selectorClips: SelectorClipState[];
+  moments: SelectorMoment[];
+  selects?: SelectorResult;
+  selectorError?: string;
 }
 
 interface SessionRequest extends Request {
@@ -85,6 +131,10 @@ function createSession(): SessionState {
     inventoryErrors: [],
     totalRuntimeSeconds: 0,
     crewStatusAttempted: false,
+    selectorStatus: "idle",
+    selectorLog: [],
+    selectorClips: [],
+    moments: [],
   };
   sessions.set(id, session);
   return session;
@@ -146,6 +196,12 @@ function serializeSession(session: SessionState) {
     totalRuntimeSeconds: session.totalRuntimeSeconds,
     crewStatus: session.crewStatus,
     crewStatusError: session.crewStatusError,
+    selectorStatus: session.selectorStatus,
+    selectorLog: session.selectorLog,
+    selectorClips: session.selectorClips,
+    moments: session.moments,
+    selects: session.selects,
+    selectorError: session.selectorError,
   };
 }
 
@@ -280,6 +336,110 @@ async function writeInventory(
   );
 }
 
+async function writeSelects(session: SessionState, result: SelectorResult) {
+  await fs.writeFile(
+    path.join(session.dir, "selects.json"),
+    JSON.stringify(result, null, 2),
+    "utf8",
+  );
+}
+
+function resetSelectorState(session: SessionState) {
+  session.selectorStatus = "idle";
+  session.selectorLog = [];
+  session.selectorClips = [];
+  session.moments = [];
+  session.selects = undefined;
+  session.selectorError = undefined;
+}
+
+function selectorLog(session: SessionState, message: string) {
+  session.selectorLog.push(`[SELECTOR] ${message}`);
+  if (session.selectorLog.length > 100) session.selectorLog.shift();
+}
+
+function selectorModulePath() {
+  return pathToFileURL(path.join(workspaceRoot, "agents/selector.js")).href;
+}
+
+async function startSelector(session: SessionState) {
+  if (session.selectorStatus === "running") return;
+  session.selectorStatus = "running";
+  selectorLog(session, "selector started; clips will be analyzed sequentially");
+  session.selectorClips = session.inventory.map((clip) => ({
+    clip_id: clip.clip_id,
+    filename: clip.filename,
+    state: "queued",
+    attempt: 0,
+  }));
+
+  try {
+    const selector = (await import(selectorModulePath())) as {
+      runSelector(args: {
+        clips: Clip[];
+        inventory: InventoryClip[];
+        sessionDir: string;
+        onProgress: (progress: {
+          clipId?: string;
+          state: SelectorClipState["state"];
+          attempt: number;
+          message: string;
+          moments?: number;
+        }) => void;
+      }): Promise<SelectorResult>;
+    };
+    const result = await selector.runSelector({
+      clips: session.clips,
+      inventory: session.inventory,
+      sessionDir: session.dir,
+      onProgress: (progress) => {
+        if (progress.clipId) {
+          const clip = session.selectorClips.find(
+            (item) => item.clip_id === progress.clipId,
+          );
+          if (clip) {
+            clip.state = progress.state;
+            clip.attempt = progress.attempt;
+            clip.message = progress.message;
+            clip.moments = progress.moments;
+          }
+        }
+        selectorLog(session, progress.message);
+      },
+    });
+    session.selects = result;
+    session.moments = result.moments;
+    session.selectorStatus = result.partial ? "error" : "complete";
+    session.status = result.partial ? "error" : "completed";
+    session.selectorError = result.partial
+      ? "Some clips could not be analyzed."
+      : undefined;
+    selectorLog(
+      session,
+      result.partial
+        ? `selector finished with ${result.errors.length} clip error(s)`
+        : `selector complete; ${result.moments.length} moments in inventory`,
+    );
+    await writeSelects(session, result);
+  } catch (error) {
+    session.selectorStatus = "error";
+    session.status = "error";
+    session.selectorError = "The selector could not complete.";
+    selectorLog(session, "selector stopped unexpectedly");
+    const result: SelectorResult = {
+      generated_at: new Date().toISOString(),
+      intent: {},
+      clips: [],
+      moments: [],
+      errors: ["The selector could not complete."],
+      partial: true,
+    };
+    session.selects = result;
+    await writeSelects(session, result).catch(() => {});
+    console.error("CUTROOM selector failed", error);
+  }
+}
+
 function rejectedMessages(rejected: RejectedClip[]) {
   return rejected.map((item) => `${item.name}: ${item.reason}`);
 }
@@ -406,6 +566,7 @@ router.post("/session/clips", (req: SessionRequest, res, next) => {
     session.inventoryErrors = rejectedMessages(rejected);
     session.totalRuntimeSeconds = inventoryRun.totalRuntimeSeconds;
     session.status = "intake";
+    resetSelectorState(session);
     await writeInventory(session, session.inventory, rejected);
     return res.json(serializeSession(session));
   });
@@ -498,6 +659,7 @@ router.post("/session/sample", async (req: SessionRequest, res, next) => {
     session.inventoryErrors = rejectedMessages(rejected);
     session.totalRuntimeSeconds = inventoryRun.totalRuntimeSeconds;
     session.status = "intake";
+    resetSelectorState(session);
     await writeInventory(session, session.inventory, rejected);
     return res.json(serializeSession(session));
   } catch (error) {
@@ -521,10 +683,17 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
       "Tell the crew what you want, or choose a preset.",
     );
   }
+  if (
+    session.selectorStatus === "running" ||
+    session.selectorStatus === "complete"
+  ) {
+    return res.json(serializeSession(session));
+  }
 
   session.brief = brief;
   session.preset = preset;
   session.status = "assembling";
+  resetSelectorState(session);
   if (!session.crewStatusAttempted) {
     session.crewStatusAttempted = true;
     try {
@@ -549,6 +718,7 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
       session.crewStatusError = "Gemini crew status is unavailable.";
     }
   }
+  void startSelector(session);
   return res.json(serializeSession(session));
 });
 

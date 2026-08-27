@@ -22,6 +22,7 @@ export function generateJSONWithVideo(
   systemPrompt: string,
   filePart: GeminiFilePart,
   schemaHint?: unknown,
+  userPayload?: string,
 ): Promise<GeminiJSON>;
 
 export function getGeminiHealth(): Promise<"ok" | "error">;
