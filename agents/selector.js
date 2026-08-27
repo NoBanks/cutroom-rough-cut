@@ -13,6 +13,23 @@ const MIN_MOMENT_SECONDS = 0.6;
 const MAX_ATTEMPTS = 8;
 const INITIAL_BACKOFF_MS = 5_000;
 const MAX_BACKOFF_MS = 90_000;
+const SHOT_SIZE_ENUM = ["XCU", "CU", "MCU", "MS", "WS", "XWS"];
+const SHOT_SIZE_ALIASES = {
+  "EXTREME CLOSE UP": "XCU",
+  "EXTREME CLOSE-UP": "XCU",
+  ECU: "XCU",
+  "CLOSE UP": "CU",
+  "CLOSE-UP": "CU",
+  "MEDIUM CLOSE UP": "MCU",
+  "MEDIUM CLOSE-UP": "MCU",
+  "MEDIUM SHOT": "MS",
+  MEDIUM: "MS",
+  "WIDE SHOT": "WS",
+  WIDE: "WS",
+  "EXTREME WIDE SHOT": "XWS",
+  "EXTREME WIDE": "XWS",
+  EWS: "XWS",
+};
 const PROMPT_PATH = path.join(
   path.dirname(new URL(import.meta.url).pathname),
   "prompts",
@@ -37,7 +54,7 @@ export const SELECTOR_OUTPUT_SCHEMA = {
           start_sec: { type: "number" },
           end_sec: { type: "number" },
           action: { type: "string" },
-          shot_size: { type: "string" },
+          shot_size: { type: "string", enum: SHOT_SIZE_ENUM },
           camera_motion: { type: "string" },
           subject_motion: { type: "string" },
           audio_event: { type: "string" },
@@ -69,15 +86,32 @@ export const SELECTOR_OUTPUT_SCHEMA = {
   required: ["moments", "quality_flags"],
 };
 
+function errorDetails(error) {
+  const status = Number(
+    error?.status ??
+      error?.code ??
+      error?.response?.status ??
+      error?.response?.statusCode ??
+      error?.cause?.status,
+  );
+  const errorClass =
+    typeof error?.name === "string" && error.name.trim()
+      ? error.name.trim()
+      : error?.constructor?.name || "Error";
+  return {
+    status: Number.isFinite(status) ? status : null,
+    errorClass,
+  };
+}
+
 function transientStatus(error) {
-  const status = Number(error?.status ?? error?.code);
+  const status = errorDetails(error).status;
   return Number.isFinite(status) && status >= 500 && status <= 599;
 }
 
-function errorMessage(error) {
-  return transientStatus(error)
-    ? `Gemini temporary ${Number(error.status ?? error.code)} failure`
-    : "Gemini selector request failed";
+function failureLabel(error) {
+  const { errorClass, status } = errorDetails(error);
+  return `${errorClass}${status === null ? "" : `/${status}`}`;
 }
 
 function sleep(milliseconds) {
@@ -126,17 +160,26 @@ function stringArray(value) {
     : [];
 }
 
+function normalizeShotSize(value) {
+  if (typeof value !== "string") return null;
+  const raw = value.trim().toUpperCase();
+  if (SHOT_SIZE_ENUM.includes(raw)) return raw;
+  return SHOT_SIZE_ALIASES[raw] || null;
+}
+
 function normaliseMoment(moment, duration) {
   if (!moment || typeof moment !== "object") return null;
   const start = Math.max(0, Math.min(duration, Number(moment.start_sec)));
   const end = Math.max(0, Math.min(duration, Number(moment.end_sec)));
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
   if (end - start < MIN_MOMENT_SECONDS || moment.dead_shot === true) return null;
+  const shotSize = normalizeShotSize(moment.shot_size);
+  if (!shotSize) return null;
   return {
     start_sec: Number(start.toFixed(3)),
     end_sec: Number(end.toFixed(3)),
     action: typeof moment.action === "string" ? moment.action.trim() : "",
-    shot_size: typeof moment.shot_size === "string" ? moment.shot_size.trim() : "",
+    shot_size: shotSize,
     camera_motion:
       typeof moment.camera_motion === "string" ? moment.camera_motion.trim() : "",
     subject_motion:
@@ -181,7 +224,7 @@ async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
         `Clip id: ${inventory.clip_id}`,
         `Analysis duration in seconds: ${prepared.analysisDuration}`,
         `Director intent: ${JSON.stringify(SELECTOR_INTENT)}`,
-        "Timecodes must be plain seconds as JSON numbers (for example, 12.5), not timecode strings.",
+         "numbers as plain seconds, never MM:SS strings",
         "Return only JSON matching this complete output schema:",
         JSON.stringify(SELECTOR_OUTPUT_SCHEMA),
       ].join("\n");
@@ -204,7 +247,7 @@ async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
       return normalized;
     } catch (error) {
       lastError = error;
-      if (!transientStatus(error) || attempt === MAX_ATTEMPTS) break;
+      if (attempt === MAX_ATTEMPTS) break;
       const backoff = Math.min(
         MAX_BACKOFF_MS,
         INITIAL_BACKOFF_MS * 2 ** (attempt - 1),
@@ -212,7 +255,7 @@ async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
       onProgress({
         state: "retrying",
         attempt,
-        message: `${errorMessage(error)} for ${inventory.filename}; retrying in ${Math.round(backoff / 1000)}s`,
+        message: `Gemini is busy, the crew is waiting it out... ${inventory.filename} attempt ${attempt + 1}/${MAX_ATTEMPTS}; retrying in ${Math.round(backoff / 1000)}s (${failureLabel(error)})`,
       });
       await sleep(backoff);
     }
@@ -220,12 +263,12 @@ async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
   onProgress({
     state: "error",
     attempt: MAX_ATTEMPTS,
-    message: `${inventory.filename}: ${errorMessage(lastError)}`,
+    message: `${inventory.filename} failed after ${MAX_ATTEMPTS} attempts (${failureLabel(lastError)}).`,
   });
   return {
     moments: [],
     quality_flags: ["selector unavailable"],
-    error: errorMessage(lastError),
+    error: `failed after ${MAX_ATTEMPTS} attempts (${failureLabel(lastError)})`,
   };
 }
 
