@@ -3,6 +3,7 @@
 # compiled output
 dist
 tmp
+artifacts/*/tmp-sessions/
 out-tsc
 *.tsbuildinfo
 .expo

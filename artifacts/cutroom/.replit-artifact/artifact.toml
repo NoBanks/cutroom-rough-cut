@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "CUTROOM"
+description = "A cinematic virtual cutting room where raw video clips move through a crew workflow toward a rough cut. This first milestone provides session-based clip intake, sample footage, a creative brief, and a placeholder assembly state without accounts, AI, or a database."
+version = "1.0.0"
+id = "artifacts/cutroom"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25719
+
+[services.development]
+run = "pnpm --filter @workspace/cutroom run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/cutroom", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/cutroom/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25719"
+BASE_PATH = "/"

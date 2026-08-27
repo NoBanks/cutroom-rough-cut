@@ -1,0 +1,20 @@
+{
+  "name": "@workspace/cutroom",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts --host 0.0.0.0",
+    "build": "vite build --config vite.config.ts",
+    "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
+    "typecheck": "node --check public/app.js"
+  },
+  "devDependencies": {
+    "@replit/vite-plugin-cartographer": "catalog:",
+    "@replit/vite-plugin-dev-banner": "catalog:",
+    "@replit/vite-plugin-runtime-error-modal": "catalog:",
+    "@types/node": "catalog:",
+    "vite": "catalog:",
+    "typescript": "~5.9.3"
+  }
+}

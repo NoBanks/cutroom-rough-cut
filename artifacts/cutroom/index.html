@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="CUTROOM turns raw footage and a creative brief into the start of a rough cut.">
+  <meta property="og:title" content="CUTROOM">
+  <meta property="og:description" content="Your first cut, tonight.">
+  <meta property="og:type" content="website">
+  <title>CUTROOM</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="app">
+    <section id="landing-state" class="state" aria-hidden="false">
+      <div class="container">
+        <header>
+          <h1>CUTROOM</h1>
+          <p class="tagline">Your first cut, tonight.</p>
+        </header>
+        <div class="actions">
+          <button id="btn-sample" class="primary-btn">
+            <span class="btn-text">Run the sample footage</span>
+          </button>
+          <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Upload footage">
+            <div class="drop-content">
+              <span class="drop-text">Drag and drop footage</span>
+              <span class="file-limits">.mp4 / .mov (10 files / 200MB max)</span>
+            </div>
+            <input type="file" id="file-input" multiple accept=".mp4,.mov" class="hidden-input" aria-hidden="true" tabindex="-1">
+          </div>
+        </div>
+        <div id="upload-error" class="error-msg" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="brief-state" class="state" aria-hidden="true">
+      <div class="container">
+        <header class="small-header"><h1>CUTROOM</h1></header>
+        <div class="brief-form">
+          <label for="brief-input">Tell the crew what you want</label>
+          <textarea id="brief-input" rows="4" placeholder="e.g. Focus on the wide shots, fast pacing..."></textarea>
+          <div class="presets" role="group" aria-label="Brief presets">
+            <button class="preset-chip" type="button" aria-pressed="false">Energetic promo</button>
+            <button class="preset-chip" type="button" aria-pressed="false">Quiet documentary</button>
+            <button class="preset-chip" type="button" aria-pressed="false">Social short 60s</button>
+          </div>
+          <button id="btn-send-brief" class="primary-btn mt-6">
+            <span class="btn-text">Send to the cutting room</span>
+          </button>
+          <div id="brief-error" class="error-msg" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="assembly-state" class="state" aria-hidden="true">
+      <div class="container terminal-container">
+        <header class="small-header"><h1>CUTROOM</h1></header>
+        <div class="terminal" role="status" aria-live="polite">
+          <p class="log-text blink">The crew is assembling...</p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
