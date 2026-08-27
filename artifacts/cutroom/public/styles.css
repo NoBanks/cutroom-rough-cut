@@ -293,6 +293,14 @@ textarea::placeholder {
   margin-bottom: 1.25rem;
 }
 
+.crew-log {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+}
+
 .log-text {
   font-family: var(--font-mono);
   color: var(--amber);

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { generateJSON } from "../lib/gemini.js";
 
 const router = Router();
 const MAX_FILES = 10;
@@ -59,6 +60,9 @@ interface SessionState {
   inventory: InventoryClip[];
   inventoryErrors: string[];
   totalRuntimeSeconds: number;
+  crewStatusAttempted: boolean;
+  crewStatus?: string;
+  crewStatusError?: string;
 }
 
 interface SessionRequest extends Request {
@@ -80,6 +84,7 @@ function createSession(): SessionState {
     inventory: [],
     inventoryErrors: [],
     totalRuntimeSeconds: 0,
+    crewStatusAttempted: false,
   };
   sessions.set(id, session);
   return session;
@@ -139,6 +144,8 @@ function serializeSession(session: SessionState) {
     inventory: session.inventory,
     inventoryErrors: session.inventoryErrors,
     totalRuntimeSeconds: session.totalRuntimeSeconds,
+    crewStatus: session.crewStatus,
+    crewStatusError: session.crewStatusError,
   };
 }
 
@@ -498,7 +505,7 @@ router.post("/session/sample", async (req: SessionRequest, res, next) => {
   }
 });
 
-router.post("/session/brief", (req: SessionRequest, res) => {
+router.post("/session/brief", async (req: SessionRequest, res) => {
   const session = getSession(req, res);
   if (session.clips.length === 0) {
     return errorResponse(res, 400, "Add footage before sending a brief.");
@@ -518,6 +525,30 @@ router.post("/session/brief", (req: SessionRequest, res) => {
   session.brief = brief;
   session.preset = preset;
   session.status = "assembling";
+  if (!session.crewStatusAttempted) {
+    session.crewStatusAttempted = true;
+    try {
+      const result = await generateJSON(
+        "You are the CUTROOM film crew warming up before a rough cut. Return one cinematic sentence about the crew warming up.",
+        `The editor's brief is: ${brief || preset}.`,
+        {
+          type: "object",
+          properties: { crew_status: { type: "string" } },
+          required: ["crew_status"],
+        },
+      );
+      if (
+        !result ||
+        typeof result.crew_status !== "string" ||
+        !result.crew_status.trim()
+      ) {
+        throw new Error("Gemini returned no crew status.");
+      }
+      session.crewStatus = result.crew_status.trim();
+    } catch {
+      session.crewStatusError = "Gemini crew status is unavailable.";
+    }
+  }
   return res.json(serializeSession(session));
 });
 

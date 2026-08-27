@@ -18,7 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
     briefError: document.getElementById('brief-error'),
     logText: document.querySelector('.log-text'),
     inventoryLog: document.getElementById('inventory-log'),
-    inventoryWarnings: document.getElementById('inventory-warnings')
+    inventoryWarnings: document.getElementById('inventory-warnings'),
+    crewLog: document.getElementById('crew-log')
   };
 
   // --- Constants ---
@@ -97,6 +98,12 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.clipNotice.textContent = messages.length
       ? `The readable clips are ready. Rejected: ${messages.join(' · ')}`
       : '';
+  }
+
+  function renderCrewStatus(status, error) {
+    elements.crewLog.textContent = status
+      ? `[CREW] ${status}`
+      : (error ? `[CREW] ${error}` : '');
   }
 
   // --- Landing State Handlers ---
@@ -282,6 +289,7 @@ document.addEventListener('DOMContentLoaded', () => {
       
        const data = await res.json();
        renderInventory(data.inventory, data.inventoryErrors);
+       renderCrewStatus(data.crewStatus, data.crewStatusError);
        switchState('assembly');
       startStatusPolling();
     } catch (err) {
@@ -328,6 +336,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionId = data.sessionId || data.id || sessionId;
         sessionStorage.setItem('cutroom_session_id', sessionId);
         renderInventory(data.inventory, data.inventoryErrors);
+        renderCrewStatus(data.crewStatus, data.crewStatusError);
         if (data.status === 'assembling') {
           switchState('assembly');
           startStatusPolling();

@@ -3,8 +3,8 @@
 CUTROOM is a virtual cutting room where a crew of AI film agents will turn raw
 video clips into a rough cut. The current milestone provides session-based
 footage intake, ffprobe clip inventory, sample footage, a creative brief
-handoff, and a placeholder assembly screen; the real editing pipeline comes
-later.
+handoff, and a Google Gemini-powered crew warm-up status; the real editing
+pipeline comes later.
 
 ## How to run
 
@@ -17,3 +17,7 @@ use real clips. Uploads are kept in temporary, randomly named session
 directories and are not persisted to a database. Each accepted clip set writes
 an `inventory.json` file with duration, resolution, frame rate, and audio
 metadata. Sessions are capped at 30 minutes of total footage.
+
+Gemini runs server-side through the official Google GenAI SDK and reads
+`GEMINI_API_KEY` from the environment. CUTROOM intentionally uses no other AI
+provider.
