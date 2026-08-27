@@ -87,26 +87,23 @@ export const SELECTOR_OUTPUT_SCHEMA = {
 };
 
 function errorDetails(error) {
-  const status = Number(
-    error?.status ??
-      error?.code ??
-      error?.response?.status ??
-      error?.response?.statusCode ??
-      error?.cause?.status,
-  );
+  const status = [
+    error?.status,
+    error?.code,
+    error?.response?.status,
+    error?.response?.statusCode,
+    error?.cause?.status,
+  ]
+    .map(Number)
+    .find(Number.isFinite);
   const errorClass =
     typeof error?.name === "string" && error.name.trim()
       ? error.name.trim()
       : error?.constructor?.name || "Error";
   return {
-    status: Number.isFinite(status) ? status : null,
+    status: status ?? null,
     errorClass,
   };
-}
-
-function transientStatus(error) {
-  const status = errorDetails(error).status;
-  return Number.isFinite(status) && status >= 500 && status <= 599;
 }
 
 function failureLabel(error) {
@@ -224,7 +221,7 @@ async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
         `Clip id: ${inventory.clip_id}`,
         `Analysis duration in seconds: ${prepared.analysisDuration}`,
         `Director intent: ${JSON.stringify(SELECTOR_INTENT)}`,
-         "numbers as plain seconds, never MM:SS strings",
+        "numbers as plain seconds, never MM:SS strings",
         "Return only JSON matching this complete output schema:",
         JSON.stringify(SELECTOR_OUTPUT_SCHEMA),
       ].join("\n");

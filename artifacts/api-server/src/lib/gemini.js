@@ -25,15 +25,30 @@ function client() {
   return cachedClient;
 }
 
+function errorStatus(error) {
+  return [
+    error?.status,
+    error?.code,
+    error?.response?.status,
+    error?.response?.statusCode,
+    error?.cause?.status,
+  ]
+    .map(Number)
+    .find(Number.isFinite);
+}
+
 function isTransientError(error) {
-  const status = Number(error?.status ?? error?.code);
+  const status = errorStatus(error);
   return status === 429 || (status >= 500 && status <= 599);
 }
 
 function cleanError(source) {
   const error = new Error("Gemini request failed.");
-  const status = Number(source?.status ?? source?.code);
-  if (Number.isFinite(status)) error.status = status;
+  const status = errorStatus(source);
+  if (status !== undefined) error.status = status;
+  if (typeof source?.name === "string" && source.name.trim()) {
+    error.name = source.name.trim();
+  }
   return error;
 }
 
@@ -123,8 +138,11 @@ export async function uploadVideo(filePath) {
     throw new Error("Gemini video processing timed out.");
   } catch (error) {
     const wrapped = new Error("Gemini video upload failed.");
-    const status = Number(error?.status ?? error?.code);
-    if (Number.isFinite(status)) wrapped.status = status;
+    const status = errorStatus(error);
+    if (status !== undefined) wrapped.status = status;
+    if (typeof error?.name === "string" && error.name.trim()) {
+      wrapped.name = error.name.trim();
+    }
     throw wrapped;
   }
 }
