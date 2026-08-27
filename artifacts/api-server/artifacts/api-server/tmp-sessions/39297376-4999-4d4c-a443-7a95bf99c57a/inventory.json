@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-08-27T20:44:29.108Z",
+  "total_duration_seconds": 1.2,
+  "clips": [
+    {
+      "filename": "valid.mp4",
+      "clip_id": "clip_5e23",
+      "duration_seconds": 1.2,
+      "resolution": "160x90",
+      "fps": 24,
+      "has_audio": true
+    }
+  ],
+  "rejected_files": []
+}

@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-08-27T20:44:14.675Z",
+  "total_duration_seconds": 302.2,
+  "clips": [
+    {
+      "filename": "valid.mp4",
+      "clip_id": "clip_5e23",
+      "duration_seconds": 1.2,
+      "resolution": "160x90",
+      "fps": 24,
+      "has_audio": true
+    },
+    {
+      "filename": "long.mp4",
+      "clip_id": "clip_bd7b",
+      "duration_seconds": 301,
+      "resolution": "16x16",
+      "fps": 1,
+      "has_audio": false,
+      "flag": "long clip - selector will sample it"
+    }
+  ],
+  "rejected_files": [
+    {
+      "name": "corrupt.mov",
+      "reason": "unreadable or corrupt video"
+    }
+  ]
+}

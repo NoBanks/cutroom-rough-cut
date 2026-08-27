@@ -1,0 +1,1 @@
+- [API artifact working directory](api-artifact-working-directory.md) — dev and published API processes may start from different directories; resolve workspace paths defensively.

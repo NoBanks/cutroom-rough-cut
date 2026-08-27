@@ -12,10 +12,13 @@ document.addEventListener('DOMContentLoaded', () => {
     dropzone: document.getElementById('dropzone'),
     uploadError: document.getElementById('upload-error'),
     briefInput: document.getElementById('brief-input'),
+    clipNotice: document.getElementById('clip-notice'),
     presetChips: document.querySelectorAll('.preset-chip'),
     btnSendBrief: document.getElementById('btn-send-brief'),
     briefError: document.getElementById('brief-error'),
-    logText: document.querySelector('.log-text')
+    logText: document.querySelector('.log-text'),
+    inventoryLog: document.getElementById('inventory-log'),
+    inventoryWarnings: document.getElementById('inventory-warnings')
   };
 
   // --- Constants ---
@@ -64,6 +67,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function formatDuration(seconds) {
+    const safeSeconds = Number(seconds) || 0;
+    const minutes = Math.floor(safeSeconds / 60);
+    const remainder = (safeSeconds % 60).toFixed(1).padStart(4, '0');
+    return `${String(minutes).padStart(2, '0')}:${remainder}`;
+  }
+
+  function formatFps(fps) {
+    if (!Number.isFinite(Number(fps))) return 'fps:unknown';
+    const value = Number(fps);
+    return `${Number.isInteger(value) ? value : value.toFixed(2)}fps`;
+  }
+
+  function renderInventory(inventory, errors) {
+    elements.inventoryLog.replaceChildren();
+    (inventory || []).forEach(clip => {
+      const line = document.createElement('div');
+      line.className = 'inventory-line';
+      const longFlag = clip.flag ? `  ${clip.flag}` : '';
+      line.textContent = `[INVENTORY] ${clip.clip_id}  ${formatDuration(clip.duration_seconds)}  ${clip.resolution}  ${formatFps(clip.fps)}  audio:${clip.has_audio ? 'yes' : 'no'}${longFlag}`;
+      elements.inventoryLog.appendChild(line);
+    });
+
+    const messages = errors || [];
+    elements.inventoryWarnings.textContent = messages.length
+      ? `Rejected footage: ${messages.join(' · ')}`
+      : '';
+    elements.clipNotice.textContent = messages.length
+      ? `The readable clips are ready. Rejected: ${messages.join(' · ')}`
+      : '';
+  }
+
   // --- Landing State Handlers ---
 
   elements.btnSample.addEventListener('click', async () => {
@@ -79,10 +114,15 @@ document.addEventListener('DOMContentLoaded', () => {
       
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to prepare sample footage.');
+        const details = Array.isArray(data.invalidFiles) ? ` ${data.invalidFiles.join(' · ')}` : '';
+        throw new Error((data.error || 'Failed to prepare sample footage.') + details);
       }
       
-      switchState('brief');
+       const data = await res.json();
+       if (data.inventoryErrors) {
+         renderInventory(data.inventory, data.inventoryErrors);
+       }
+       switchState('brief');
     } catch (err) {
       elements.uploadError.textContent = err.message;
     } finally {
@@ -185,10 +225,13 @@ document.addEventListener('DOMContentLoaded', () => {
       
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Upload failed. Please try again.');
+        const details = Array.isArray(data.invalidFiles) ? ` ${data.invalidFiles.join(' · ')}` : '';
+        throw new Error((data.error || 'Upload failed. Please try again.') + details);
       }
       
-      switchState('brief');
+       const data = await res.json();
+       renderInventory(data.inventory, data.inventoryErrors);
+       switchState('brief');
     } catch (err) {
       elements.uploadError.textContent = err.message;
     } finally {
@@ -237,7 +280,9 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(data.error || 'Failed to send brief. Please try again.');
       }
       
-      switchState('assembly');
+       const data = await res.json();
+       renderInventory(data.inventory, data.inventoryErrors);
+       switchState('assembly');
       startStatusPolling();
     } catch (err) {
       elements.briefError.textContent = err.message;
@@ -257,11 +302,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const res = await fetch(`/api/session?sessionId=${sessionId}`);
         if (res.ok) {
           const data = await res.json();
-          
-          if (data.log && data.status !== 'completed') {
-             elements.logText.textContent = data.log;
-          }
-          
           if (data.status === 'completed') {
             clearInterval(pollInterval);
             elements.logText.textContent = 'Assembly complete. Your rough cut is ready.';
@@ -287,6 +327,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const data = await res.json();
         sessionId = data.sessionId || data.id || sessionId;
         sessionStorage.setItem('cutroom_session_id', sessionId);
+        renderInventory(data.inventory, data.inventoryErrors);
         if (data.status === 'assembling') {
           switchState('assembly');
           startStatusPolling();

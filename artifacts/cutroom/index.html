@@ -42,6 +42,7 @@
       <div class="container">
         <header class="small-header"><h1>CUTROOM</h1></header>
         <div class="brief-form">
+          <div id="clip-notice" class="clip-notice" aria-live="polite"></div>
           <label for="brief-input">Tell the crew what you want</label>
           <textarea id="brief-input" rows="4" placeholder="e.g. Focus on the wide shots, fast pacing..."></textarea>
           <div class="presets" role="group" aria-label="Brief presets">
@@ -61,7 +62,9 @@
       <div class="container terminal-container">
         <header class="small-header"><h1>CUTROOM</h1></header>
         <div class="terminal" role="status" aria-live="polite">
-          <p class="log-text blink">The crew is assembling...</p>
+          <div id="inventory-log" class="inventory-log"></div>
+          <div id="inventory-warnings" class="inventory-warnings" aria-live="polite"></div>
+          <p id="assembly-message" class="log-text blink">The crew is assembling...</p>
         </div>
       </div>
     </section>

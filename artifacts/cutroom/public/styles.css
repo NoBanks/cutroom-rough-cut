@@ -185,6 +185,17 @@ button:disabled {
   gap: 1.5rem;
 }
 
+.clip-notice {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.clip-notice:empty {
+  display: none;
+}
+
 label {
   font-size: 1.125rem;
   font-weight: 400;
@@ -256,6 +267,30 @@ textarea::placeholder {
   border-radius: 2px;
   border-left: 2px solid var(--amber);
   min-height: 200px;
+}
+
+.inventory-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-bottom: 1.75rem;
+  overflow-x: auto;
+}
+
+.inventory-line {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+.inventory-warnings {
+  color: var(--error);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin-bottom: 1.25rem;
 }
 
 .log-text {

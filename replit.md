@@ -25,6 +25,8 @@ CUTROOM is a temporary-session virtual cutting room for turning raw video clips 
 ## Architecture decisions
 
 - Sessions use an HTTP-only crypto-random cookie and in-memory metadata; clip bytes live only under a matching temporary directory.
+- Accepted clip sets are probed with ffprobe and committed with an `inventory.json`; failed probes are rejected without replacing the prior session state.
+- Total clip runtime is capped at 30 minutes, while clips over 5 minutes are accepted and flagged for sampling.
 - The app intentionally avoids accounts, a database, AI/model calls, and payments for this milestone.
 - Sample footage is copied into the current session so the sample path behaves like uploaded footage.
 
