@@ -9,13 +9,20 @@ const FILE_POLL_ATTEMPTS = 30;
 
 let healthCache = { checkedAt: 0, status: "error" };
 let healthInFlight;
+const FILE_CLIENT = Symbol("gemini-file-client");
+let cachedClient;
+let cachedApiKey;
 
 function client() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("Gemini is not configured.");
   }
-  return new GoogleGenAI({ apiKey });
+  if (!cachedClient || cachedApiKey !== apiKey) {
+    cachedClient = new GoogleGenAI({ apiKey });
+    cachedApiKey = apiKey;
+  }
+  return cachedClient;
 }
 
 function isTransientError(error) {
@@ -23,8 +30,11 @@ function isTransientError(error) {
   return status === 429 || (status >= 500 && status <= 599);
 }
 
-function cleanError() {
-  return new Error("Gemini request failed.");
+function cleanError(source) {
+  const error = new Error("Gemini request failed.");
+  const status = Number(source?.status ?? source?.code);
+  if (Number.isFinite(status)) error.status = status;
+  return error;
 }
 
 function jsonConfig(systemPrompt, schemaHint) {
@@ -45,8 +55,14 @@ function parseJSON(text) {
   }
 }
 
-async function requestJSON(model, systemPrompt, contents, schemaHint) {
-  const response = await client().models.generateContent({
+async function requestJSON(
+  model,
+  systemPrompt,
+  contents,
+  schemaHint,
+  ai = client(),
+) {
+  const response = await ai.models.generateContent({
     model,
     contents,
     config: jsonConfig(systemPrompt, schemaHint),
