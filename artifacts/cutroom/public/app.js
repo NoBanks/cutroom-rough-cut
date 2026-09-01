@@ -20,11 +20,22 @@ document.addEventListener('DOMContentLoaded', () => {
     inventoryLog: document.getElementById('inventory-log'),
     inventoryWarnings: document.getElementById('inventory-warnings'),
     crewLog: document.getElementById('crew-log'),
+    directorLog: document.getElementById('director-log'),
     selectorLog: document.getElementById('selector-log'),
     momentCount: document.getElementById('moment-count'),
     momentTableBody: document.getElementById('moment-table-body'),
     momentEmpty: document.getElementById('moment-empty'),
-    assemblyMessage: document.getElementById('assembly-message')
+    assemblyMessage: document.getElementById('assembly-message'),
+    editorLog: document.getElementById('editor-log'),
+    editorCount: document.getElementById('editor-count'),
+    editorSummary: document.getElementById('editor-summary'),
+    structureNotes: document.getElementById('structure-notes'),
+    edlDownloads: document.getElementById('edl-downloads'),
+    downloadEdlJson: document.getElementById('download-edl-json'),
+    downloadEdlCsv: document.getElementById('download-edl-csv'),
+    edlTableBody: document.getElementById('edl-table-body'),
+    edlEmpty: document.getElementById('edl-empty'),
+    unusedMoments: document.getElementById('unused-moments')
   };
 
   // --- Constants ---
@@ -111,6 +122,20 @@ document.addEventListener('DOMContentLoaded', () => {
       : (error ? `[CREW] ${error}` : '');
   }
 
+  function renderDirector(data) {
+    const logs = Array.isArray(data?.directorLog) ? data.directorLog : [];
+    elements.directorLog.replaceChildren();
+    logs.slice(-8).forEach(log => {
+      const line = document.createElement('div');
+      line.className = 'director-line';
+      line.textContent = log;
+      elements.directorLog.appendChild(line);
+    });
+    if (!logs.length && data?.directorStatus === 'running') {
+      elements.directorLog.textContent = '[DIRECTOR] interpreting the brief...';
+    }
+  }
+
   function renderSelector(data) {
     const logs = Array.isArray(data?.selectorLog) ? data.selectorLog : [];
     elements.selectorLog.replaceChildren();
@@ -146,13 +171,81 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.momentEmpty.hidden = moments.length > 0;
   }
 
+  function renderEditor(data) {
+    const logs = Array.isArray(data?.editorLog) ? data.editorLog : [];
+    elements.editorLog.replaceChildren();
+    logs.slice(-8).forEach(log => {
+      const line = document.createElement('div');
+      line.className = 'editor-line';
+      line.textContent = log;
+      elements.editorLog.appendChild(line);
+    });
+
+    const result = data?.editorResult;
+    const edits = Array.isArray(result?.edl) ? result.edl : [];
+    elements.editorCount.textContent = edits.length
+      ? `${edits.length} ${edits.length === 1 ? 'edit' : 'edits'} · ${formatDuration(result.total_duration_sec)}`
+      : '';
+    elements.editorSummary.textContent = result?.summary || '';
+    elements.structureNotes.replaceChildren();
+    (Array.isArray(result?.structure_notes) ? result.structure_notes : []).forEach(note => {
+      const item = document.createElement('li');
+      item.textContent = note;
+      elements.structureNotes.appendChild(item);
+    });
+
+    elements.edlTableBody.replaceChildren();
+    edits.forEach(edit => {
+      const row = document.createElement('tr');
+      const values = [
+        edit.edit_index || '—',
+        edit.filename || edit.clip_id || 'unknown',
+        `${formatDuration(edit.source_start_sec)} → ${formatDuration(edit.source_end_sec)}`,
+        formatDuration(edit.duration_sec),
+        edit.role || '—',
+        edit.action || '—'
+      ];
+      values.forEach(value => {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+      elements.edlTableBody.appendChild(row);
+    });
+    elements.edlEmpty.hidden = edits.length > 0;
+
+    const unused = Array.isArray(result?.unused_strong_moments)
+      ? result.unused_strong_moments
+      : [];
+    elements.unusedMoments.replaceChildren();
+    if (unused.length) {
+      const heading = document.createElement('h3');
+      heading.textContent = `Unused strong moments (${unused.length})`;
+      elements.unusedMoments.appendChild(heading);
+      unused.forEach(moment => {
+        const item = document.createElement('div');
+        item.className = 'unused-moment';
+        item.textContent = `${moment.filename || moment.clip_id} ${formatDuration(moment.start_sec)} → ${formatDuration(moment.end_sec)} · ${moment.action || 'moment'} — ${moment.reason || 'held back'}`;
+        elements.unusedMoments.appendChild(item);
+      });
+    }
+
+    const ready = data?.editorStatus === 'complete';
+    elements.edlDownloads.hidden = !ready;
+    if (ready) {
+      elements.downloadEdlJson.href = `/api/session/edl.json?sessionId=${encodeURIComponent(sessionId)}`;
+      elements.downloadEdlCsv.href = `/api/session/edl.csv?sessionId=${encodeURIComponent(sessionId)}`;
+    }
+  }
+
   function renderAssemblyMessage(data) {
     if (data?.status === 'completed') {
-      elements.assemblyMessage.textContent = 'Selector complete. Your moment inventory is ready.';
+      elements.assemblyMessage.textContent = 'Assembly complete. Your EDL is ready to download.';
       elements.assemblyMessage.classList.remove('blink');
       elements.assemblyMessage.style.color = 'var(--amber)';
     } else if (data?.status === 'error') {
-      elements.assemblyMessage.textContent = data.selectorError || 'Selector finished with errors.';
+      elements.assemblyMessage.textContent =
+        data.editorError || data.directorError || data.selectorError || 'The crew finished with errors.';
       elements.assemblyMessage.classList.remove('blink');
       elements.assemblyMessage.style.color = 'var(--error)';
     } else {
@@ -346,7 +439,9 @@ document.addEventListener('DOMContentLoaded', () => {
        const data = await res.json();
        renderInventory(data.inventory, data.inventoryErrors);
        renderCrewStatus(data.crewStatus, data.crewStatusError);
+        renderDirector(data);
         renderSelector(data);
+        renderEditor(data);
         renderAssemblyMessage(data);
        switchState('assembly');
       startStatusPolling();
@@ -371,18 +466,24 @@ document.addEventListener('DOMContentLoaded', () => {
           if (data.status === 'completed') {
             clearInterval(pollInterval);
              renderSelector(data);
+              renderDirector(data);
+              renderEditor(data);
              renderAssemblyMessage(data);
-             elements.logText.textContent = 'Assembly complete. Your moment inventory is ready.';
+              elements.logText.textContent = 'Assembly complete. Your EDL is ready to download.';
              elements.logText.classList.remove('blink');
           } else if (data.status === 'error') {
             clearInterval(pollInterval);
              renderSelector(data);
+              renderDirector(data);
+              renderEditor(data);
              renderAssemblyMessage(data);
-             elements.logText.textContent = 'Selector finished with errors. Review the log above.';
+              elements.logText.textContent = 'The crew finished with errors. Review the logs above.';
             elements.logText.classList.remove('blink');
             elements.logText.style.color = 'var(--error)';
            } else {
              renderSelector(data);
+             renderDirector(data);
+             renderEditor(data);
              renderAssemblyMessage(data);
           }
         }
@@ -402,7 +503,9 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionStorage.setItem('cutroom_session_id', sessionId);
         renderInventory(data.inventory, data.inventoryErrors);
         renderCrewStatus(data.crewStatus, data.crewStatusError);
+        renderDirector(data);
         renderSelector(data);
+        renderEditor(data);
         renderAssemblyMessage(data);
         if (data.status === 'assembling') {
           switchState('assembly');

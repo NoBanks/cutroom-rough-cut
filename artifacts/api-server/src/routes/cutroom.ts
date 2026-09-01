@@ -131,6 +131,7 @@ interface SessionState {
   inventoryErrors: string[];
   totalRuntimeSeconds: number;
   crewStatusAttempted: boolean;
+  directorAttempted: boolean;
   crewStatus?: string;
   crewStatusError?: string;
   directorStatus: "idle" | "running" | "complete" | "error";
@@ -170,6 +171,7 @@ function createSession(): SessionState {
     inventoryErrors: [],
     totalRuntimeSeconds: 0,
     crewStatusAttempted: false,
+    directorAttempted: false,
     directorStatus: "idle",
     directorLog: [],
     selectorStatus: "idle",
@@ -396,6 +398,67 @@ async function writeSelects(session: SessionState, result: SelectorResult) {
   );
 }
 
+async function writeDirector(session: SessionState, result: DirectorResult) {
+  await fs.writeFile(
+    path.join(session.dir, "director.json"),
+    JSON.stringify(
+      { generated_at: new Date().toISOString(), ...result },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+async function writeEditorFiles(session: SessionState, result: EditorResult) {
+  await fs.writeFile(
+    path.join(session.dir, "edl.json"),
+    JSON.stringify(result, null, 2),
+    "utf8",
+  );
+  const header = [
+    "edit_index",
+    "clip_id",
+    "filename",
+    "source_start_sec",
+    "source_end_sec",
+    "duration_sec",
+    "role",
+    "action",
+    "shot_size",
+  ];
+  const csvValue = (value: unknown) =>
+    `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const rows = result.edl.map((row) =>
+    [
+      row.edit_index,
+      row.clip_id,
+      row.filename,
+      row.source_start_sec,
+      row.source_end_sec,
+      row.duration_sec,
+      row.role,
+      row.action,
+      row.shot_size,
+    ]
+      .map(csvValue)
+      .join(","),
+  );
+  await fs.writeFile(
+    path.join(session.dir, "edl.csv"),
+    [header.join(","), ...rows, ""].join("\n"),
+    "utf8",
+  );
+}
+
+async function clearGeneratedFiles(session: SessionState) {
+  await Promise.all(
+    ["director.json", "selects.json", "edl.json", "edl.csv"].map((file) =>
+      fs.rm(path.join(session.dir, file), { force: true }),
+    ),
+  );
+}
+
 function resetSelectorState(session: SessionState) {
   session.selectorStatus = "idle";
   session.selectorLog = [];
@@ -405,16 +468,54 @@ function resetSelectorState(session: SessionState) {
   session.selectorError = undefined;
 }
 
+function resetCreativeState(session: SessionState) {
+  session.crewStatusAttempted = false;
+  session.directorAttempted = false;
+  session.crewStatus = undefined;
+  session.crewStatusError = undefined;
+  session.directorStatus = "idle";
+  session.directorLog = [];
+  session.directorIntent = undefined;
+  session.directorsNote = undefined;
+  session.directorError = undefined;
+  session.editorStatus = "idle";
+  session.editorLog = [];
+  session.editorResult = undefined;
+  session.editorError = undefined;
+  resetSelectorState(session);
+}
+
+function directorLog(session: SessionState, message: string) {
+  session.directorLog.push(`[DIRECTOR] ${message}`);
+  if (session.directorLog.length > 40) session.directorLog.shift();
+}
+
 function selectorLog(session: SessionState, message: string) {
   session.selectorLog.push(`[SELECTOR] ${message}`);
   if (session.selectorLog.length > 100) session.selectorLog.shift();
+}
+
+function editorLog(session: SessionState, message: string) {
+  session.editorLog.push(`[EDITOR] ${message}`);
+  if (session.editorLog.length > 40) session.editorLog.shift();
 }
 
 function selectorModulePath() {
   return pathToFileURL(path.join(workspaceRoot, "agents/selector.js")).href;
 }
 
-async function startSelector(session: SessionState) {
+function directorModulePath() {
+  return pathToFileURL(path.join(workspaceRoot, "agents/director.js")).href;
+}
+
+function editorModulePath() {
+  return pathToFileURL(path.join(workspaceRoot, "agents/editor.js")).href;
+}
+
+async function startSelector(
+  session: SessionState,
+  directorIntent: Record<string, unknown>,
+) {
   if (session.selectorStatus === "running") return;
   session.selectorStatus = "running";
   selectorLog(session, "selector started; clips will be analyzed sequentially");
@@ -431,6 +532,7 @@ async function startSelector(session: SessionState) {
         clips: Clip[];
         inventory: InventoryClip[];
         sessionDir: string;
+        intent: Record<string, unknown>;
         onProgress: (progress: {
           clipId?: string;
           state: SelectorClipState["state"];
@@ -444,6 +546,7 @@ async function startSelector(session: SessionState) {
       clips: session.clips,
       inventory: session.inventory,
       sessionDir: session.dir,
+      intent: directorIntent,
       onProgress: (progress) => {
         if (progress.clipId) {
           const clip = session.selectorClips.find(
@@ -462,7 +565,7 @@ async function startSelector(session: SessionState) {
     session.selects = result;
     session.moments = result.moments;
     session.selectorStatus = result.partial ? "error" : "complete";
-    session.status = result.partial ? "error" : "completed";
+    session.status = result.partial ? "error" : "assembling";
     session.selectorError = result.partial
       ? "Some clips could not be analyzed."
       : undefined;
@@ -473,6 +576,11 @@ async function startSelector(session: SessionState) {
         : `selector complete; ${result.moments.length} moments in inventory`,
     );
     await writeSelects(session, result);
+    if (!result.partial) {
+      await startEditor(session);
+    } else {
+      editorLog(session, "editor skipped because the selector had clip errors");
+    }
   } catch (error) {
     session.selectorStatus = "error";
     session.status = "error";
@@ -489,6 +597,99 @@ async function startSelector(session: SessionState) {
     session.selects = result;
     await writeSelects(session, result).catch(() => {});
     console.error("CUTROOM selector failed", error);
+  }
+}
+
+async function startEditor(session: SessionState) {
+  if (session.editorStatus === "running" || session.editorStatus === "complete") {
+    return;
+  }
+  session.editorStatus = "running";
+  editorLog(session, "editor started; shaping the selected moments");
+  try {
+    const editor = (await import(editorModulePath())) as {
+      runEditor(args: {
+        intent: Record<string, unknown>;
+        selects: SelectorResult;
+        inventory: InventoryClip[];
+        sessionId: string;
+      }): Promise<EditorResult>;
+    };
+    const result = await editor.runEditor({
+      intent: session.directorIntent || {},
+      selects: session.selects || {
+        generated_at: new Date().toISOString(),
+        intent: {},
+        clips: [],
+        moments: [],
+        errors: [],
+        partial: false,
+      },
+      inventory: session.inventory,
+      sessionId: session.id,
+    });
+    session.editorResult = result;
+    session.editorStatus = "complete";
+    session.status = "completed";
+    editorLog(
+      session,
+      `editor complete; ${result.edl.length} edits / ${result.total_duration_sec}s`,
+    );
+    await writeEditorFiles(session, result);
+  } catch (error) {
+    session.editorStatus = "error";
+    session.status = "error";
+    session.editorError =
+      error instanceof Error ? error.message : "The editor could not complete.";
+    editorLog(session, session.editorError);
+    console.error("CUTROOM editor failed", error);
+  }
+}
+
+async function startCreativePipeline(session: SessionState) {
+  if (
+    session.directorAttempted ||
+    session.directorStatus === "running" ||
+    session.directorStatus === "complete"
+  ) {
+    return;
+  }
+  session.directorAttempted = true;
+  session.directorStatus = "running";
+  directorLog(session, "director started; interpreting the brief");
+  try {
+    const director = (await import(directorModulePath())) as {
+      runDirector(args: {
+        brief: string;
+        preset: string;
+        sessionId: string;
+        inventory: InventoryClip[];
+      }): Promise<DirectorResult>;
+    };
+    const result = await director.runDirector({
+      brief: session.brief,
+      preset: session.preset,
+      sessionId: session.id,
+      inventory: session.inventory,
+    });
+    session.directorIntent = result.intent;
+    session.directorsNote =
+      typeof result.intent.directors_note === "string"
+        ? result.intent.directors_note
+        : undefined;
+    session.directorStatus = "complete";
+    directorLog(
+      session,
+      session.directorsNote || "intent locked; passing the brief to the selector",
+    );
+    await writeDirector(session, result);
+    await startSelector(session, result.intent);
+  } catch (error) {
+    session.directorStatus = "error";
+    session.status = "error";
+    session.directorError = "The director could not interpret this brief.";
+    directorLog(session, session.directorError);
+    console.error("CUTROOM director failed", error);
   }
 }
 
@@ -535,6 +736,39 @@ const upload = multer({
 
 router.get("/session", (req: SessionRequest, res) => {
   res.json(serializeSession(getSession(req, res)));
+});
+
+router.get("/session/edl.json", async (req: SessionRequest, res, next) => {
+  try {
+    const session = getSession(req, res);
+    const filePath = path.join(session.dir, "edl.json");
+    const contents = await fs.readFile(filePath, "utf8");
+    res
+      .type("application/json")
+      .set("Content-Disposition", 'attachment; filename="edl.json"')
+      .send(contents);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return errorResponse(res, 404, "The EDL is not ready yet.");
+    }
+    return next(error);
+  }
+});
+
+router.get("/session/edl.csv", async (req: SessionRequest, res, next) => {
+  try {
+    const session = getSession(req, res);
+    const contents = await fs.readFile(path.join(session.dir, "edl.csv"), "utf8");
+    res
+      .type("text/csv")
+      .set("Content-Disposition", 'attachment; filename="edl.csv"')
+      .send(contents);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return errorResponse(res, 404, "The EDL is not ready yet.");
+    }
+    return next(error);
+  }
 });
 
 router.post("/session/clips", (req: SessionRequest, res, next) => {
@@ -618,7 +852,8 @@ router.post("/session/clips", (req: SessionRequest, res, next) => {
     session.inventoryErrors = rejectedMessages(rejected);
     session.totalRuntimeSeconds = inventoryRun.totalRuntimeSeconds;
     session.status = "intake";
-    resetSelectorState(session);
+    resetCreativeState(session);
+    await clearGeneratedFiles(session);
     await writeInventory(session, session.inventory, rejected);
     return res.json(serializeSession(session));
   });
@@ -711,7 +946,8 @@ router.post("/session/sample", async (req: SessionRequest, res, next) => {
     session.inventoryErrors = rejectedMessages(rejected);
     session.totalRuntimeSeconds = inventoryRun.totalRuntimeSeconds;
     session.status = "intake";
-    resetSelectorState(session);
+    resetCreativeState(session);
+    await clearGeneratedFiles(session);
     await writeInventory(session, session.inventory, rejected);
     return res.json(serializeSession(session));
   } catch (error) {
@@ -736,8 +972,11 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
     );
   }
   if (
+    session.directorAttempted ||
     session.selectorStatus === "running" ||
-    session.selectorStatus === "complete"
+    session.selectorStatus === "complete" ||
+    session.editorStatus === "running" ||
+    session.editorStatus === "complete"
   ) {
     return res.json(serializeSession(session));
   }
@@ -745,7 +984,8 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
   session.brief = brief;
   session.preset = preset;
   session.status = "assembling";
-  resetSelectorState(session);
+  resetCreativeState(session);
+  await clearGeneratedFiles(session);
   if (!session.crewStatusAttempted) {
     session.crewStatusAttempted = true;
     try {
@@ -770,7 +1010,7 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
       session.crewStatusError = "Gemini crew status is unavailable.";
     }
   }
-  void startSelector(session);
+  void startCreativePipeline(session);
   return res.json(serializeSession(session));
 });
 

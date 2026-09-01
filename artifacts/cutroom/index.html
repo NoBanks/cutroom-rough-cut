@@ -65,6 +65,7 @@
           <div id="inventory-log" class="inventory-log"></div>
           <div id="inventory-warnings" class="inventory-warnings" aria-live="polite"></div>
           <div id="crew-log" class="crew-log"></div>
+          <div id="director-log" class="director-log" aria-live="polite"></div>
           <div id="selector-log" class="selector-log" aria-live="polite"></div>
           <div class="moment-inventory">
             <div class="moment-heading">
@@ -88,6 +89,36 @@
               <p id="moment-empty" class="moment-empty">No selects yet.</p>
             </div>
           </div>
+          <section id="editor-panel" class="editor-panel" aria-live="polite">
+            <div class="moment-heading">
+              <h2>Rough cut EDL</h2>
+              <span id="editor-count" class="moment-count"></span>
+            </div>
+            <div id="editor-log" class="editor-log"></div>
+            <p id="editor-summary" class="editor-summary"></p>
+            <ul id="structure-notes" class="structure-notes"></ul>
+            <div id="edl-downloads" class="edl-downloads">
+              <a id="download-edl-json" href="#" download="edl.json">Download JSON</a>
+              <a id="download-edl-csv" href="#" download="edl.csv">Download CSV</a>
+            </div>
+            <div class="moment-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Clip</th>
+                    <th>Source in / out</th>
+                    <th>Duration</th>
+                    <th>Role</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="edl-table-body"></tbody>
+              </table>
+              <p id="edl-empty" class="moment-empty">The Editor is waiting for selects.</p>
+            </div>
+            <div id="unused-moments" class="unused-moments"></div>
+          </section>
           <p id="assembly-message" class="log-text blink">The crew is assembling...</p>
         </div>
       </div>
