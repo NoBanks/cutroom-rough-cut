@@ -202,7 +202,7 @@ function normaliseResult(result, duration) {
   };
 }
 
-async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
+async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) {
   let lastError;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
@@ -220,7 +220,7 @@ async function analyseClip({ clip, inventory, sessionDir, onProgress }) {
         `Clip filename: ${inventory.filename}`,
         `Clip id: ${inventory.clip_id}`,
         `Analysis duration in seconds: ${prepared.analysisDuration}`,
-        `Director intent: ${JSON.stringify(SELECTOR_INTENT)}`,
+        `Director intent: ${JSON.stringify(intent)}`,
         "numbers as plain seconds, never MM:SS strings",
         "Return only JSON matching this complete output schema:",
         JSON.stringify(SELECTOR_OUTPUT_SCHEMA),
@@ -273,6 +273,7 @@ export async function runSelector({
   clips,
   inventory,
   sessionDir,
+  intent = SELECTOR_INTENT,
   onProgress = () => {},
 }) {
   const clipsResult = [];
@@ -291,6 +292,7 @@ export async function runSelector({
       clip,
       inventory: clipInventory,
       sessionDir,
+      intent,
       onProgress: (progress) =>
         onProgress({ ...progress, clipId: clipInventory.clip_id }),
     });
@@ -311,7 +313,7 @@ export async function runSelector({
 
   return {
     generated_at: new Date().toISOString(),
-    intent: SELECTOR_INTENT,
+    intent,
     clips: clipsResult,
     moments,
     errors,

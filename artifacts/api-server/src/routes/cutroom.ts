@@ -90,6 +90,36 @@ interface SelectorResult {
   partial: boolean;
 }
 
+interface DirectorResult {
+  intent: Record<string, unknown>;
+}
+
+interface EditorResult {
+  generated_at: string;
+  summary: string;
+  structure_notes: string[];
+  total_duration_sec: number;
+  edl: Array<{
+    edit_index: number;
+    clip_id: string;
+    filename: string;
+    source_start_sec: number;
+    source_end_sec: number;
+    duration_sec: number;
+    role: string;
+    action: string;
+    shot_size: string;
+  }>;
+  unused_strong_moments: Array<{
+    clip_id: string;
+    filename: string;
+    start_sec: number;
+    end_sec: number;
+    action: string;
+    reason: string;
+  }>;
+}
+
 interface SessionState {
   id: string;
   dir: string;
@@ -103,12 +133,21 @@ interface SessionState {
   crewStatusAttempted: boolean;
   crewStatus?: string;
   crewStatusError?: string;
+  directorStatus: "idle" | "running" | "complete" | "error";
+  directorLog: string[];
+  directorIntent?: Record<string, unknown>;
+  directorsNote?: string;
+  directorError?: string;
   selectorStatus: "idle" | "running" | "complete" | "error";
   selectorLog: string[];
   selectorClips: SelectorClipState[];
   moments: SelectorMoment[];
   selects?: SelectorResult;
   selectorError?: string;
+  editorStatus: "idle" | "running" | "complete" | "error";
+  editorLog: string[];
+  editorResult?: EditorResult;
+  editorError?: string;
 }
 
 interface SessionRequest extends Request {
@@ -131,10 +170,14 @@ function createSession(): SessionState {
     inventoryErrors: [],
     totalRuntimeSeconds: 0,
     crewStatusAttempted: false,
+    directorStatus: "idle",
+    directorLog: [],
     selectorStatus: "idle",
     selectorLog: [],
     selectorClips: [],
     moments: [],
+    editorStatus: "idle",
+    editorLog: [],
   };
   sessions.set(id, session);
   return session;
@@ -196,12 +239,21 @@ function serializeSession(session: SessionState) {
     totalRuntimeSeconds: session.totalRuntimeSeconds,
     crewStatus: session.crewStatus,
     crewStatusError: session.crewStatusError,
+    directorStatus: session.directorStatus,
+    directorLog: session.directorLog,
+    directorIntent: session.directorIntent,
+    directorsNote: session.directorsNote,
+    directorError: session.directorError,
     selectorStatus: session.selectorStatus,
     selectorLog: session.selectorLog,
     selectorClips: session.selectorClips,
     moments: session.moments,
     selects: session.selects,
     selectorError: session.selectorError,
+    editorStatus: session.editorStatus,
+    editorLog: session.editorLog,
+    editorResult: session.editorResult,
+    editorError: session.editorError,
   };
 }
 
