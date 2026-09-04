@@ -120,6 +120,20 @@ interface EditorResult {
   }>;
 }
 
+interface RoughCut {
+  filename: string;
+  path: string;
+  shots: number;
+  sizeBytes: number;
+  durationSec: number;
+  fps: number | null;
+  width: number;
+  height: number;
+  videoCodec: string;
+  pixelFormat: string;
+  audioCodec: string;
+}
+
 interface SessionState {
   id: string;
   dir: string;
@@ -149,6 +163,10 @@ interface SessionState {
   editorLog: string[];
   editorResult?: EditorResult;
   editorError?: string;
+  assemblyStatus: "idle" | "running" | "complete" | "error";
+  assemblyLog: string[];
+  roughCut?: RoughCut;
+  assemblyError?: string;
 }
 
 interface SessionRequest extends Request {
@@ -180,6 +198,8 @@ function createSession(): SessionState {
     moments: [],
     editorStatus: "idle",
     editorLog: [],
+    assemblyStatus: "idle",
+    assemblyLog: [],
   };
   sessions.set(id, session);
   return session;
@@ -256,6 +276,23 @@ function serializeSession(session: SessionState) {
     editorLog: session.editorLog,
     editorResult: session.editorResult,
     editorError: session.editorError,
+    assemblyStatus: session.assemblyStatus,
+    assemblyLog: session.assemblyLog,
+    assemblyError: session.assemblyError,
+    roughCut: session.roughCut
+      ? {
+          filename: session.roughCut.filename,
+          shots: session.roughCut.shots,
+          sizeBytes: session.roughCut.sizeBytes,
+          durationSec: session.roughCut.durationSec,
+          fps: session.roughCut.fps,
+          width: session.roughCut.width,
+          height: session.roughCut.height,
+          videoCodec: session.roughCut.videoCodec,
+          pixelFormat: session.roughCut.pixelFormat,
+          audioCodec: session.roughCut.audioCodec,
+        }
+      : undefined,
   };
 }
 
@@ -453,10 +490,14 @@ async function writeEditorFiles(session: SessionState, result: EditorResult) {
 
 async function clearGeneratedFiles(session: SessionState) {
   await Promise.all(
-    ["director.json", "selects.json", "edl.json", "edl.csv"].map((file) =>
-      fs.rm(path.join(session.dir, file), { force: true }),
+    ["director.json", "selects.json", "edl.json", "edl.csv", "roughcut.mp4"].map(
+      (file) => fs.rm(path.join(session.dir, file), { force: true }),
     ),
   );
+  await fs.rm(path.join(session.dir, "render"), {
+    recursive: true,
+    force: true,
+  });
 }
 
 function resetSelectorState(session: SessionState) {
@@ -482,6 +523,10 @@ function resetCreativeState(session: SessionState) {
   session.editorLog = [];
   session.editorResult = undefined;
   session.editorError = undefined;
+  session.assemblyStatus = "idle";
+  session.assemblyLog = [];
+  session.roughCut = undefined;
+  session.assemblyError = undefined;
   resetSelectorState(session);
 }
 
@@ -498,6 +543,15 @@ function selectorLog(session: SessionState, message: string) {
 function editorLog(session: SessionState, message: string) {
   session.editorLog.push(`[EDITOR] ${message}`);
   if (session.editorLog.length > 40) session.editorLog.shift();
+}
+
+function assemblyLog(session: SessionState, message: string) {
+  session.assemblyLog.push(`[ASSEMBLY] ${message}`);
+  if (session.assemblyLog.length > 40) session.assemblyLog.shift();
+}
+
+function assemblyModulePath() {
+  return pathToFileURL(path.join(workspaceRoot, "agents/assembly.js")).href;
 }
 
 function selectorModulePath() {
@@ -600,6 +654,47 @@ async function startSelector(
   }
 }
 
+async function startAssembly(session: SessionState) {
+  if (session.assemblyStatus === "running") {
+    return { started: false, busy: true } as const;
+  }
+  if (!session.editorResult || session.editorResult.edl.length === 0) {
+    return { started: false, busy: false } as const;
+  }
+  session.assemblyStatus = "running";
+  session.assemblyError = undefined;
+  session.roughCut = undefined;
+  try {
+    const assembly = (await import(assemblyModulePath())) as {
+      runAssembly(args: {
+        edl: EditorResult["edl"];
+        clips: Clip[];
+        sessionDir: string;
+        onLog: (message: string) => void;
+      }): Promise<RoughCut>;
+    };
+    const roughCut = await assembly.runAssembly({
+      edl: session.editorResult.edl,
+      clips: session.clips,
+      sessionDir: session.dir,
+      onLog: (message) => assemblyLog(session, message),
+    });
+    session.roughCut = roughCut;
+    session.assemblyStatus = "complete";
+    session.status = "completed";
+  } catch (error) {
+    session.assemblyStatus = "error";
+    session.status = "error";
+    session.assemblyError =
+      error instanceof Error
+        ? error.message
+        : "The rough cut could not be rendered.";
+    assemblyLog(session, session.assemblyError);
+    console.error("CUTROOM assembly failed", error);
+  }
+  return { started: true, busy: false } as const;
+}
+
 async function startEditor(session: SessionState) {
   if (session.editorStatus === "running" || session.editorStatus === "complete") {
     return;
@@ -630,12 +725,15 @@ async function startEditor(session: SessionState) {
     });
     session.editorResult = result;
     session.editorStatus = "complete";
-    session.status = "completed";
     editorLog(
       session,
       `editor complete; ${result.edl.length} edits / ${result.total_duration_sec}s`,
     );
     await writeEditorFiles(session, result);
+    await startAssembly(session);
+    if (session.assemblyStatus === "idle") {
+      session.status = "completed";
+    }
   } catch (error) {
     session.editorStatus = "error";
     session.status = "error";
@@ -738,12 +836,48 @@ router.get("/session", (req: SessionRequest, res) => {
   res.json(serializeSession(getSession(req, res)));
 });
 
-router.get("/session/edl.json", async (req: SessionRequest, res, next) => {
+router.get("/session/edl.json", sendEdlJson);
+
+router.get("/session/edl.csv", sendEdlCsv);
+
+// The router-level middleware resolves the session before path parameters
+// exist, so download routes shaped /session/:sessionId/<file> have to look the
+// session up again from the parameter.
+function sessionFromRoute(req: SessionRequest, res: Response): SessionState {
+  const routeId = req.params?.sessionId;
+  const routed = typeof routeId === "string" ? sessions.get(routeId) : undefined;
+  return routed ?? getSession(req, res);
+}
+
+async function sendRoughCut(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+) {
   try {
-    const session = getSession(req, res);
-    const filePath = path.join(session.dir, "edl.json");
-    const contents = await fs.readFile(filePath, "utf8");
-    res
+    const session = sessionFromRoute(req, res);
+    const filePath = path.join(session.dir, "roughcut.mp4");
+    await fs.access(filePath);
+    res.type("video/mp4");
+    res.set("Accept-Ranges", "bytes");
+    return res.sendFile(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return errorResponse(res, 404, "The rough cut is not ready yet.");
+    }
+    return next(error);
+  }
+}
+
+async function sendEdlJson(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+) {
+  try {
+    const session = sessionFromRoute(req, res);
+    const contents = await fs.readFile(path.join(session.dir, "edl.json"), "utf8");
+    return res
       .type("application/json")
       .set("Content-Disposition", 'attachment; filename="edl.json"')
       .send(contents);
@@ -753,13 +887,17 @@ router.get("/session/edl.json", async (req: SessionRequest, res, next) => {
     }
     return next(error);
   }
-});
+}
 
-router.get("/session/edl.csv", async (req: SessionRequest, res, next) => {
+async function sendEdlCsv(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+) {
   try {
-    const session = getSession(req, res);
+    const session = sessionFromRoute(req, res);
     const contents = await fs.readFile(path.join(session.dir, "edl.csv"), "utf8");
-    res
+    return res
       .type("text/csv")
       .set("Content-Disposition", 'attachment; filename="edl.csv"')
       .send(contents);
@@ -767,6 +905,27 @@ router.get("/session/edl.csv", async (req: SessionRequest, res, next) => {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
       return errorResponse(res, 404, "The EDL is not ready yet.");
     }
+    return next(error);
+  }
+}
+
+router.get("/session/roughcut.mp4", sendRoughCut);
+router.get("/session/:sessionId/roughcut.mp4", sendRoughCut);
+router.get("/session/:sessionId/edl.json", sendEdlJson);
+router.get("/session/:sessionId/edl.csv", sendEdlCsv);
+
+router.post("/session/render", async (req: SessionRequest, res, next) => {
+  try {
+    const session = getSession(req, res);
+    if (session.assemblyStatus === "running") {
+      return errorResponse(res, 409, "The crew is mid-cut. Give it a moment.");
+    }
+    if (!session.editorResult || session.editorResult.edl.length === 0) {
+      return errorResponse(res, 400, "There is no EDL to render yet.");
+    }
+    void startAssembly(session);
+    return res.json(serializeSession(session));
+  } catch (error) {
     return next(error);
   }
 });

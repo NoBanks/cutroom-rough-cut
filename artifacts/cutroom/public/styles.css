@@ -302,7 +302,8 @@ textarea::placeholder {
 }
 
 .director-log,
-.editor-log {
+.editor-log,
+.assembly-log {
   color: var(--amber);
   font-family: var(--font-mono);
   font-size: 0.78rem;
@@ -311,7 +312,8 @@ textarea::placeholder {
 }
 
 .director-line,
-.editor-line {
+.editor-line,
+.assembly-line {
   border-top: 1px solid #292929;
   padding: 0.35rem 0;
 }
@@ -429,6 +431,44 @@ textarea::placeholder {
   font-size: 0.75rem;
   line-height: 1.5;
   margin: 0 0 1rem 1.15rem;
+}
+
+.roughcut-panel {
+  margin: 0 0 1.25rem;
+}
+
+.roughcut-panel[hidden] {
+  display: none;
+}
+
+.roughcut-player {
+  background: #000;
+  border: 1px solid #292929;
+  display: block;
+  max-width: 100%;
+  width: 100%;
+}
+
+.roughcut-meta {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  margin: 0.5rem 0 0;
+}
+
+.directors-note {
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0 0 1rem;
+}
+
+.directors-note:empty {
+  display: none;
+}
+
+.edl-downloads a[hidden] {
+  display: none;
 }
 
 .edl-downloads {

@@ -35,6 +35,12 @@ document.addEventListener('DOMContentLoaded', () => {
     downloadEdlCsv: document.getElementById('download-edl-csv'),
     edlTableBody: document.getElementById('edl-table-body'),
     edlEmpty: document.getElementById('edl-empty'),
+    assemblyLog: document.getElementById('assembly-log'),
+    roughcutPanel: document.getElementById('roughcut-panel'),
+    roughcutPlayer: document.getElementById('roughcut-player'),
+    roughcutMeta: document.getElementById('roughcut-meta'),
+    directorsNote: document.getElementById('directors-note'),
+    downloadRoughcut: document.getElementById('download-roughcut'),
     unusedMoments: document.getElementById('unused-moments')
   };
 
@@ -225,7 +231,7 @@ document.addEventListener('DOMContentLoaded', () => {
       unused.forEach(moment => {
         const item = document.createElement('div');
         item.className = 'unused-moment';
-        item.textContent = `${moment.filename || moment.clip_id} ${formatDuration(moment.start_sec)} → ${formatDuration(moment.end_sec)} · ${moment.action || 'moment'} — ${moment.reason || 'held back'}`;
+        item.textContent = `${moment.filename || moment.clip_id} ${formatDuration(moment.start_sec)} → ${formatDuration(moment.end_sec)} · ${moment.action || 'moment'} - ${moment.reason || 'held back'}`;
         elements.unusedMoments.appendChild(item);
       });
     }
@@ -236,16 +242,60 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.downloadEdlJson.href = `/api/session/edl.json?sessionId=${encodeURIComponent(sessionId)}`;
       elements.downloadEdlCsv.href = `/api/session/edl.csv?sessionId=${encodeURIComponent(sessionId)}`;
     }
+    elements.downloadRoughcut.hidden = data?.assemblyStatus !== 'complete';
+  }
+
+  let roughcutLoadedFor = '';
+
+  function renderAssembly(data) {
+    const logs = Array.isArray(data?.assemblyLog) ? data.assemblyLog : [];
+    elements.assemblyLog.replaceChildren();
+    logs.slice(-8).forEach(log => {
+      const line = document.createElement('div');
+      line.className = 'assembly-line';
+      line.textContent = log;
+      elements.assemblyLog.appendChild(line);
+    });
+
+    elements.directorsNote.textContent = data?.directorsNote
+      ? `Director's note: ${data.directorsNote}`
+      : '';
+
+    const cut = data?.roughCut;
+    const complete = data?.assemblyStatus === 'complete' && cut;
+    elements.roughcutPanel.hidden = !complete;
+    if (!complete) {
+      roughcutLoadedFor = '';
+      return;
+    }
+
+    const source = `/api/session/roughcut.mp4?sessionId=${encodeURIComponent(sessionId)}`;
+    if (roughcutLoadedFor !== source) {
+      elements.roughcutPlayer.src = source;
+      elements.downloadRoughcut.href = source;
+      roughcutLoadedFor = source;
+    }
+    const fps = Number.isFinite(Number(cut.fps)) ? `${Number(cut.fps)}fps` : 'fps unknown';
+    const megabytes = (Number(cut.sizeBytes) || 0) / (1024 * 1024);
+    elements.roughcutMeta.textContent =
+      `${cut.shots} shots · ${cut.durationSec}s · ${fps} · ${cut.height}p · ${cut.videoCodec}/${cut.audioCodec} · ${megabytes.toFixed(1)}MB`;
   }
 
   function renderAssemblyMessage(data) {
     if (data?.status === 'completed') {
-      elements.assemblyMessage.textContent = 'Assembly complete. Your EDL is ready to download.';
+      elements.assemblyMessage.textContent =
+        data?.assemblyStatus === 'complete'
+          ? 'The rough cut is ready. Play it, then take the MP4 or the EDL.'
+          : 'Assembly complete. Your EDL is ready to download.';
       elements.assemblyMessage.classList.remove('blink');
       elements.assemblyMessage.style.color = 'var(--amber)';
     } else if (data?.status === 'error') {
       elements.assemblyMessage.textContent =
-        data.editorError || data.directorError || data.selectorError || 'The crew finished with errors.';
+        data.assemblyError ||
+        data.editorError ||
+        data.directorError ||
+        data.selectorError ||
+        'The crew finished with errors.';
       elements.assemblyMessage.classList.remove('blink');
       elements.assemblyMessage.style.color = 'var(--error)';
     } else {
@@ -442,6 +492,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderDirector(data);
         renderSelector(data);
         renderEditor(data);
+        renderAssembly(data);
         renderAssemblyMessage(data);
        switchState('assembly');
       startStatusPolling();
@@ -468,14 +519,19 @@ document.addEventListener('DOMContentLoaded', () => {
              renderSelector(data);
               renderDirector(data);
               renderEditor(data);
+        renderAssembly(data);
              renderAssemblyMessage(data);
-              elements.logText.textContent = 'Assembly complete. Your EDL is ready to download.';
+              elements.logText.textContent =
+                data.assemblyStatus === 'complete'
+                  ? 'The rough cut is ready. Play it, then take the MP4 or the EDL.'
+                  : 'Assembly complete. Your EDL is ready to download.';
              elements.logText.classList.remove('blink');
           } else if (data.status === 'error') {
             clearInterval(pollInterval);
              renderSelector(data);
               renderDirector(data);
               renderEditor(data);
+        renderAssembly(data);
              renderAssemblyMessage(data);
               elements.logText.textContent = 'The crew finished with errors. Review the logs above.';
             elements.logText.classList.remove('blink');
@@ -484,6 +540,7 @@ document.addEventListener('DOMContentLoaded', () => {
              renderSelector(data);
              renderDirector(data);
              renderEditor(data);
+        renderAssembly(data);
              renderAssemblyMessage(data);
           }
         }
@@ -506,6 +563,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderDirector(data);
         renderSelector(data);
         renderEditor(data);
+        renderAssembly(data);
         renderAssemblyMessage(data);
         if (data.status === 'assembling') {
           switchState('assembly');
