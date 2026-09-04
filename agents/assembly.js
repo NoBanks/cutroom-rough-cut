@@ -113,7 +113,7 @@ async function probeFile(filePath, budgetMs) {
 
 function videoFilters() {
   return [
-    `scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease`,
+    `scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease:flags=fast_bilinear`,
     `pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black`,
     `fps=${TARGET_FPS}`,
     "format=yuv420p",
@@ -122,12 +122,16 @@ function videoFilters() {
   ].join(",");
 }
 
-function audioFilters() {
-  return [
-    "loudnorm=I=-16:TP=-1.5:LRA=11",
-    `aresample=${AUDIO_RATE}`,
-    "aformat=sample_fmts=fltp:channel_layouts=stereo",
-  ].join(",");
+// loudnorm on generated silence resolves to an infinite gain and hands the AAC
+// encoder NaN samples, which kills the whole render ("Input contains (near)
+// NaN/+-Inf"). Clips with no audio track get the silence passed through
+// untouched instead.
+function audioFilters(hasAudio) {
+  const filters = [];
+  if (hasAudio) filters.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+  filters.push(`aresample=${AUDIO_RATE}`);
+  filters.push("aformat=sample_fmts=fltp:channel_layouts=stereo");
+  return filters.join(",");
 }
 
 // Every shot is cut to a whole number of frames at 24fps. A partial trailing
@@ -140,18 +144,32 @@ function frameAlignedDuration(seconds) {
 }
 
 function buildShotArgs(segment, outputPath) {
-  const args = ["-hide_banner", "-nostdin", "-y", "-i", segment.sourcePath];
+  // -ss goes BEFORE -i so ffmpeg seeks to the span instead of decoding the clip
+  // from zero for every shot. It is still frame accurate because the shot is
+  // re-encoded. Output seeking made a 12 shot render miss the five minute limit
+  // on the deployment box.
+  const args = [
+    "-hide_banner",
+    "-nostdin",
+    "-y",
+    "-ss",
+    segment.startSec.toFixed(3),
+    "-t",
+    segment.durationSec.toFixed(3),
+    "-i",
+    segment.sourcePath,
+  ];
   if (!segment.hasAudio) {
     args.push(
       "-f",
       "lavfi",
+      "-t",
+      segment.durationSec.toFixed(3),
       "-i",
       `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE}`,
     );
   }
   args.push(
-    "-ss",
-    segment.startSec.toFixed(3),
     "-t",
     segment.durationSec.toFixed(3),
     "-map",
@@ -161,13 +179,15 @@ function buildShotArgs(segment, outputPath) {
     "-vf",
     videoFilters(),
     "-af",
-    audioFilters(),
+    audioFilters(segment.hasAudio),
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    "ultrafast",
     "-crf",
-    "20",
+    "23",
+    "-threads",
+    "0",
     "-profile:v",
     "high",
     "-pix_fmt",
@@ -220,7 +240,9 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
   log(`cutting ${rows.length} ${rows.length === 1 ? "shot" : "shots"}...`);
 
   const shotFiles = [];
+  const probeCache = new Map();
   for (let index = 0; index < rows.length; index += 1) {
+    const shotStartedAt = Date.now();
     const row = rows[index];
     const sourcePath = resolveSource(row, sourceClips);
     if (!sourcePath) {
@@ -236,7 +258,11 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
     if (!Number.isFinite(rawDuration) || rawDuration <= 0) {
       throw new Error(`Edit ${index + 1} has no usable duration.`);
     }
-    const probe = await probeFile(sourcePath, remaining());
+    let probe = probeCache.get(sourcePath);
+    if (!probe) {
+      probe = await probeFile(sourcePath, remaining());
+      probeCache.set(sourcePath, probe);
+    }
     // Shot filenames come from the edit index, never from user input.
     const shotPath = path.join(
       renderDir,
@@ -256,6 +282,10 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
       remaining(),
     );
     shotFiles.push(shotPath);
+    // A slow deployment box needs to show life instead of a silent wait.
+    log(
+      `shot ${index + 1}/${rows.length} done, ${((Date.now() - shotStartedAt) / 1000).toFixed(1)}s`,
+    );
   }
 
   const listPath = path.join(renderDir, "concat.txt");
