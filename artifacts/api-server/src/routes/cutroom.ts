@@ -134,6 +134,26 @@ interface RoughCut {
   audioCodec: string;
 }
 
+interface AppliedOrder {
+  op: string;
+  position: number | null;
+  reason: string;
+  detail: string;
+  before: string;
+  after: string;
+}
+
+interface ReviewerResult {
+  generated_at: string;
+  watched_runtime_sec: number;
+  verdict: "ship" | "one_pass";
+  pacing_findings: string[];
+  continuity_findings: string[];
+  repetition_findings: string[];
+  orders: Array<Record<string, unknown>>;
+  reviewers_note: string;
+}
+
 interface SessionState {
   id: string;
   dir: string;
@@ -167,6 +187,16 @@ interface SessionState {
   assemblyLog: string[];
   roughCut?: RoughCut;
   assemblyError?: string;
+  reviewerStatus: "idle" | "running" | "complete" | "error";
+  reviewerLog: string[];
+  reviewerResult?: ReviewerResult;
+  reviewerError?: string;
+  reviewAttempted: boolean;
+  appliedOrders: AppliedOrder[];
+  skippedOrders: string[];
+  cutVersion: number;
+  roughCutV1?: RoughCut;
+  editorResultV1?: EditorResult;
 }
 
 interface SessionRequest extends Request {
@@ -200,6 +230,12 @@ function createSession(): SessionState {
     editorLog: [],
     assemblyStatus: "idle",
     assemblyLog: [],
+    reviewerStatus: "idle",
+    reviewerLog: [],
+    reviewAttempted: false,
+    appliedOrders: [],
+    skippedOrders: [],
+    cutVersion: 1,
   };
   sessions.set(id, session);
   return session;
@@ -279,6 +315,22 @@ function serializeSession(session: SessionState) {
     assemblyStatus: session.assemblyStatus,
     assemblyLog: session.assemblyLog,
     assemblyError: session.assemblyError,
+    reviewerStatus: session.reviewerStatus,
+    reviewerLog: session.reviewerLog,
+    reviewerResult: session.reviewerResult,
+    reviewerError: session.reviewerError,
+    appliedOrders: session.appliedOrders,
+    skippedOrders: session.skippedOrders,
+    cutVersion: session.cutVersion,
+    hasRoughCutV1: Boolean(session.roughCutV1),
+    roughCutV1: session.roughCutV1
+      ? {
+          filename: session.roughCutV1.filename,
+          shots: session.roughCutV1.shots,
+          sizeBytes: session.roughCutV1.sizeBytes,
+          durationSec: session.roughCutV1.durationSec,
+        }
+      : undefined,
     roughCut: session.roughCut
       ? {
           filename: session.roughCut.filename,
@@ -490,7 +542,15 @@ async function writeEditorFiles(session: SessionState, result: EditorResult) {
 
 async function clearGeneratedFiles(session: SessionState) {
   await Promise.all(
-    ["director.json", "selects.json", "edl.json", "edl.csv", "roughcut.mp4"].map(
+    [
+      "director.json",
+      "selects.json",
+      "edl.json",
+      "edl.csv",
+      "roughcut.mp4",
+      "roughcut_v1.mp4",
+      "review.json",
+    ].map(
       (file) => fs.rm(path.join(session.dir, file), { force: true }),
     ),
   );
@@ -527,6 +587,16 @@ function resetCreativeState(session: SessionState) {
   session.assemblyLog = [];
   session.roughCut = undefined;
   session.assemblyError = undefined;
+  session.reviewerStatus = "idle";
+  session.reviewerLog = [];
+  session.reviewerResult = undefined;
+  session.reviewerError = undefined;
+  session.reviewAttempted = false;
+  session.appliedOrders = [];
+  session.skippedOrders = [];
+  session.cutVersion = 1;
+  session.roughCutV1 = undefined;
+  session.editorResultV1 = undefined;
   resetSelectorState(session);
 }
 
@@ -548,6 +618,15 @@ function editorLog(session: SessionState, message: string) {
 function assemblyLog(session: SessionState, message: string) {
   session.assemblyLog.push(`[ASSEMBLY] ${message}`);
   if (session.assemblyLog.length > 40) session.assemblyLog.shift();
+}
+
+function reviewerLog(session: SessionState, message: string) {
+  session.reviewerLog.push(`[REVIEWER] ${message}`);
+  if (session.reviewerLog.length > 40) session.reviewerLog.shift();
+}
+
+function reviewerModulePath() {
+  return pathToFileURL(path.join(workspaceRoot, "agents/reviewer.js")).href;
 }
 
 function assemblyModulePath() {
@@ -682,6 +761,9 @@ async function startAssembly(session: SessionState) {
     session.roughCut = roughCut;
     session.assemblyStatus = "complete";
     session.status = "completed";
+    if (!session.reviewAttempted) {
+      await startReviewer(session);
+    }
   } catch (error) {
     session.assemblyStatus = "error";
     session.status = "error";
@@ -693,6 +775,150 @@ async function startAssembly(session: SessionState) {
     console.error("CUTROOM assembly failed", error);
   }
   return { started: true, busy: false } as const;
+}
+
+async function writeReview(session: SessionState) {
+  if (!session.reviewerResult) return;
+  await fs.writeFile(
+    path.join(session.dir, "review.json"),
+    JSON.stringify(
+      {
+        ...session.reviewerResult,
+        cut_version: session.cutVersion,
+        applied_orders: session.appliedOrders,
+        skipped_orders: session.skippedOrders,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+// There is exactly one improvement pass. reviewAttempted is set before the
+// second render so the reviewer can never be re-entered from startAssembly.
+async function startReviewer(session: SessionState) {
+  if (session.reviewAttempted || session.reviewerStatus === "running") return;
+  if (!session.roughCut || !session.editorResult) return;
+  session.reviewAttempted = true;
+  session.reviewerStatus = "running";
+  session.reviewerError = undefined;
+  reviewerLog(session, "reviewer started; watching the assembled cut");
+  try {
+    const reviewer = (await import(reviewerModulePath())) as {
+      runReviewer(args: {
+        roughCutPath: string;
+        intent: Record<string, unknown>;
+        editorResult: EditorResult;
+        roughCut: RoughCut;
+        sessionId: string;
+        onLog: (message: string) => void;
+      }): Promise<ReviewerResult>;
+      applyOrders(args: {
+        edl: EditorResult["edl"];
+        orders: Array<Record<string, unknown>>;
+        benched: EditorResult["unused_strong_moments"];
+        inventory: InventoryClip[];
+      }): {
+        ok: boolean;
+        errors: string[];
+        applied: AppliedOrder[];
+        skipped: string[];
+        edl: EditorResult["edl"];
+        total_duration_sec: number;
+      };
+    };
+    const review = await reviewer.runReviewer({
+      roughCutPath: session.roughCut.path,
+      intent: session.directorIntent || {},
+      editorResult: session.editorResult,
+      roughCut: session.roughCut,
+      sessionId: session.id,
+      onLog: (message) => reviewerLog(session, message),
+    });
+    session.reviewerResult = review;
+    reviewerLog(
+      session,
+      `verdict: ${review.verdict === "ship" ? "SHIP" : "ONE PASS"}`,
+    );
+    reviewerLog(session, review.reviewers_note);
+
+    if (review.verdict === "ship") {
+      session.reviewerStatus = "complete";
+      session.status = "completed";
+      await writeReview(session);
+      return;
+    }
+
+    const outcome = reviewer.applyOrders({
+      edl: session.editorResult.edl,
+      orders: review.orders,
+      benched: session.editorResult.unused_strong_moments,
+      inventory: session.inventory,
+    });
+    outcome.skipped.forEach((message) => reviewerLog(session, `skipped ${message}`));
+    session.skippedOrders = outcome.skipped;
+    if (!outcome.ok) {
+      outcome.errors.forEach((message) => reviewerLog(session, `skipped ${message}`));
+      reviewerLog(
+        session,
+        "no order survived validation; the first cut stands as delivered",
+      );
+      session.reviewerStatus = "complete";
+      session.status = "completed";
+      await writeReview(session);
+      return;
+    }
+
+    const previousCut = session.roughCut;
+    const previousEditorResult = session.editorResult;
+    const v1Path = path.join(session.dir, "roughcut_v1.mp4");
+    await fs.copyFile(previousCut.path, v1Path);
+    session.roughCutV1 = { ...previousCut, filename: "roughcut_v1.mp4", path: v1Path };
+    session.editorResultV1 = previousEditorResult;
+    session.appliedOrders = outcome.applied;
+    session.editorResult = {
+      ...previousEditorResult,
+      total_duration_sec: outcome.total_duration_sec,
+      edl: outcome.edl,
+    };
+    await writeEditorFiles(session, session.editorResult);
+    reviewerLog(
+      session,
+      `applying ${outcome.applied.length} ${
+        outcome.applied.length === 1 ? "order" : "orders"
+      }; re-cutting once`,
+    );
+    await startAssembly(session);
+    if (session.assemblyStatus === "complete") {
+      session.cutVersion = 2;
+      session.reviewerStatus = "complete";
+      session.status = "completed";
+      reviewerLog(session, "cut v2 is on the bench; v1 is still downloadable");
+    } else {
+      session.editorResult = previousEditorResult;
+      session.roughCut = previousCut;
+      session.roughCutV1 = undefined;
+      session.editorResultV1 = undefined;
+      session.appliedOrders = [];
+      await fs.copyFile(v1Path, previousCut.path).catch(() => {});
+      await fs.rm(v1Path, { force: true });
+      await writeEditorFiles(session, previousEditorResult).catch(() => {});
+      session.assemblyStatus = "complete";
+      session.reviewerStatus = "complete";
+      session.status = "completed";
+      reviewerLog(
+        session,
+        "the second render failed; the first cut stands as delivered",
+      );
+    }
+    await writeReview(session);
+  } catch (error) {
+    session.reviewerStatus = "error";
+    session.reviewerError = "The reviewer could not watch this cut.";
+    reviewerLog(session, session.reviewerError);
+    console.error("CUTROOM reviewer failed", error);
+  }
 }
 
 async function startEditor(session: SessionState) {
@@ -869,6 +1095,26 @@ async function sendRoughCut(
   }
 }
 
+async function sendRoughCutV1(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+) {
+  try {
+    const session = sessionFromRoute(req, res);
+    const filePath = path.join(session.dir, "roughcut_v1.mp4");
+    await fs.access(filePath);
+    res.type("video/mp4");
+    res.set("Accept-Ranges", "bytes");
+    return res.sendFile(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return errorResponse(res, 404, "There is no first cut to download.");
+    }
+    return next(error);
+  }
+}
+
 async function sendEdlJson(
   req: SessionRequest,
   res: Response,
@@ -910,6 +1156,8 @@ async function sendEdlCsv(
 }
 
 router.get("/session/roughcut.mp4", sendRoughCut);
+router.get("/session/roughcut_v1.mp4", sendRoughCutV1);
+router.get("/session/:sessionId/roughcut_v1.mp4", sendRoughCutV1);
 router.get("/session/:sessionId/roughcut.mp4", sendRoughCut);
 router.get("/session/:sessionId/edl.json", sendEdlJson);
 router.get("/session/:sessionId/edl.csv", sendEdlCsv);

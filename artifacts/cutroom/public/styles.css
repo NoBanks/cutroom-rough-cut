@@ -6,6 +6,8 @@
   --amber: #f5a623;
   --amber-hover: #d48a1b;
   --amber-dim: rgba(245, 166, 35, 0.08);
+  --cyan: #4fd1e0;
+  --magenta: #e879f9;
   --error: #ef4444;
   --font-sans: "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   --font-mono: "Space Mono", "Courier New", Courier, monospace;
@@ -318,6 +320,14 @@ textarea::placeholder {
   padding: 0.35rem 0;
 }
 
+.reviewer-log {
+  color: var(--magenta);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  margin-bottom: 1rem;
+}
+
 .selector-log {
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -325,12 +335,164 @@ textarea::placeholder {
   line-height: 1.55;
   margin-bottom: 1.75rem;
   max-height: 12rem;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .selector-line {
   border-top: 1px solid #292929;
   padding: 0.35rem 0;
+}
+
+/* Every log panel scrolls inside itself. The panels have their own max-height
+   so a long crew conversation never grows the page under the reader. */
+.director-log,
+.selector-log,
+.editor-log,
+.assembly-log,
+.reviewer-log {
+  max-height: 12rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.log-entry {
+  align-items: baseline;
+  border-top: 1px solid #292929;
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.35rem 0;
+}
+
+.log-time {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+.log-badge {
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  padding: 0.1rem 0.35rem;
+  text-transform: uppercase;
+}
+
+.log-message {
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.log-entry--director {
+  color: var(--amber);
+}
+
+.log-entry--selector {
+  color: var(--cyan);
+}
+
+.log-entry--editor {
+  color: var(--text-primary);
+}
+
+.log-entry--reviewer {
+  color: var(--magenta);
+}
+
+.log-entry--assembly,
+.log-entry--inventory,
+.log-entry--crew {
+  color: var(--text-muted);
+}
+
+.cut-label {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.6rem;
+  text-transform: uppercase;
+}
+
+.review-panel {
+  border-top: 1px solid #333;
+  margin-bottom: 1.5rem;
+  padding-top: 1.25rem;
+}
+
+.reviewers-note {
+  color: var(--magenta);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+}
+
+.review-findings h3,
+.review-orders h3 {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+}
+
+.finding-group {
+  margin-bottom: 0.9rem;
+}
+
+.finding-group ul {
+  list-style: none;
+  padding: 0;
+}
+
+.finding-group li {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.55;
+  padding: 0.2rem 0 0.2rem 0.8rem;
+  position: relative;
+}
+
+.finding-group li::before {
+  color: var(--magenta);
+  content: "-";
+  left: 0;
+  position: absolute;
+}
+
+.review-order {
+  border-left: 2px solid var(--magenta);
+  margin-bottom: 0.8rem;
+  padding-left: 0.75rem;
+}
+
+.review-order-title {
+  color: var(--magenta);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+}
+
+.review-order-reason {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.review-order-line {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .moment-inventory {

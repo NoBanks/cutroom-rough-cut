@@ -96,15 +96,27 @@
             </div>
             <div id="editor-log" class="editor-log"></div>
             <div id="assembly-log" class="assembly-log" aria-live="polite"></div>
+            <div id="reviewer-log" class="reviewer-log" aria-live="polite"></div>
             <div id="roughcut-panel" class="roughcut-panel" hidden>
+              <h3 id="cut-label" class="cut-label">Rough cut</h3>
               <video id="roughcut-player" class="roughcut-player" controls playsinline preload="metadata"></video>
               <p id="roughcut-meta" class="roughcut-meta"></p>
             </div>
+            <section id="review-panel" class="review-panel" hidden>
+              <div class="moment-heading">
+                <h2>The review</h2>
+                <span id="review-verdict" class="moment-count"></span>
+              </div>
+              <p id="reviewers-note" class="reviewers-note"></p>
+              <div id="review-findings" class="review-findings"></div>
+              <div id="review-orders" class="review-orders"></div>
+            </section>
             <p id="directors-note" class="directors-note"></p>
             <p id="editor-summary" class="editor-summary"></p>
             <ul id="structure-notes" class="structure-notes"></ul>
             <div id="edl-downloads" class="edl-downloads">
               <a id="download-roughcut" href="#" download="roughcut.mp4">Download MP4</a>
+              <a id="download-roughcut-v1" href="#" download="roughcut_v1.mp4" hidden>Download v1 MP4</a>
               <a id="download-edl-json" href="#" download="edl.json">Download JSON</a>
               <a id="download-edl-csv" href="#" download="edl.csv">Download CSV</a>
             </div>

@@ -40,6 +40,14 @@ document.addEventListener('DOMContentLoaded', () => {
     roughcutPlayer: document.getElementById('roughcut-player'),
     roughcutMeta: document.getElementById('roughcut-meta'),
     directorsNote: document.getElementById('directors-note'),
+    cutLabel: document.getElementById('cut-label'),
+    reviewerLog: document.getElementById('reviewer-log'),
+    reviewPanel: document.getElementById('review-panel'),
+    reviewVerdict: document.getElementById('review-verdict'),
+    reviewersNote: document.getElementById('reviewers-note'),
+    reviewFindings: document.getElementById('review-findings'),
+    reviewOrders: document.getElementById('review-orders'),
+    downloadRoughcutV1: document.getElementById('download-roughcut-v1'),
     downloadRoughcut: document.getElementById('download-roughcut'),
     unusedMoments: document.getElementById('unused-moments')
   };
@@ -103,6 +111,59 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${Number.isInteger(value) ? value : value.toFixed(2)}fps`;
   }
 
+  // Each agent keeps its own accent. Entries are stamped the first time they
+  // reach the screen and the stamp is cached, so a re-render never rewrites the
+  // clock. Auto-scroll sets scrollTop on the log container itself. Never scroll
+  // an element into view here: that scrolls the whole page, not the panel.
+  const AGENT_ACCENTS = {
+    DIRECTOR: 'director',
+    SELECTOR: 'selector',
+    EDITOR: 'editor',
+    REVIEWER: 'reviewer',
+    ASSEMBLY: 'assembly',
+    INVENTORY: 'inventory',
+    CREW: 'crew'
+  };
+
+  const logStamps = new Map();
+
+  function stampFor(key) {
+    if (!logStamps.has(key)) {
+      const now = new Date();
+      const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()]
+        .map(value => String(value).padStart(2, '0'))
+        .join(':');
+      logStamps.set(key, stamp);
+    }
+    return logStamps.get(key);
+  }
+
+  function renderLogLines(container, logs, fallbackAgent, limit) {
+    if (!container) return;
+    container.replaceChildren();
+    (Array.isArray(logs) ? logs : []).slice(-limit).forEach(entry => {
+      const text = String(entry);
+      const match = text.match(/^\[([A-Z]+)\]\s*([\s\S]*)$/);
+      const agent = match ? match[1] : fallbackAgent;
+      const message = match ? match[2] : text;
+      const accent = AGENT_ACCENTS[agent] || 'crew';
+      const line = document.createElement('div');
+      line.className = `log-entry log-entry--${accent}`;
+      const time = document.createElement('span');
+      time.className = 'log-time';
+      time.textContent = stampFor(`${agent}|${message}`);
+      const badge = document.createElement('span');
+      badge.className = 'log-badge';
+      badge.textContent = agent;
+      const body = document.createElement('span');
+      body.className = 'log-message';
+      body.textContent = message;
+      line.append(time, badge, body);
+      container.appendChild(line);
+    });
+    container.scrollTop = container.scrollHeight;
+  }
+
   function renderInventory(inventory, errors) {
     elements.inventoryLog.replaceChildren();
     (inventory || []).forEach(clip => {
@@ -130,27 +191,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderDirector(data) {
     const logs = Array.isArray(data?.directorLog) ? data.directorLog : [];
-    elements.directorLog.replaceChildren();
-    logs.slice(-8).forEach(log => {
-      const line = document.createElement('div');
-      line.className = 'director-line';
-      line.textContent = log;
-      elements.directorLog.appendChild(line);
-    });
-    if (!logs.length && data?.directorStatus === 'running') {
-      elements.directorLog.textContent = '[DIRECTOR] interpreting the brief...';
-    }
+    const lines = !logs.length && data?.directorStatus === 'running'
+      ? ['[DIRECTOR] interpreting the brief...']
+      : logs;
+    renderLogLines(elements.directorLog, lines, 'DIRECTOR', 8);
   }
 
   function renderSelector(data) {
-    const logs = Array.isArray(data?.selectorLog) ? data.selectorLog : [];
-    elements.selectorLog.replaceChildren();
-    logs.slice(-12).forEach(log => {
-      const line = document.createElement('div');
-      line.className = 'selector-line';
-      line.textContent = log;
-      elements.selectorLog.appendChild(line);
-    });
+    renderLogLines(elements.selectorLog, data?.selectorLog, 'SELECTOR', 12);
 
     const moments = Array.isArray(data?.moments) ? data.moments : [];
     elements.momentCount.textContent = `${moments.length} ${moments.length === 1 ? 'moment' : 'moments'}`;
@@ -178,14 +226,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderEditor(data) {
-    const logs = Array.isArray(data?.editorLog) ? data.editorLog : [];
-    elements.editorLog.replaceChildren();
-    logs.slice(-8).forEach(log => {
-      const line = document.createElement('div');
-      line.className = 'editor-line';
-      line.textContent = log;
-      elements.editorLog.appendChild(line);
-    });
+    renderLogLines(elements.editorLog, data?.editorLog, 'EDITOR', 8);
 
     const result = data?.editorResult;
     const edits = Array.isArray(result?.edl) ? result.edl : [];
@@ -245,21 +286,84 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.downloadRoughcut.hidden = data?.assemblyStatus !== 'complete';
   }
 
+  function appendFindingGroup(container, heading, items) {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const group = document.createElement('div');
+    group.className = 'finding-group';
+    const title = document.createElement('h3');
+    title.textContent = heading;
+    group.appendChild(title);
+    const list = document.createElement('ul');
+    items.forEach(item => {
+      const entry = document.createElement('li');
+      entry.textContent = item;
+      list.appendChild(entry);
+    });
+    group.appendChild(list);
+    container.appendChild(group);
+  }
+
+  function renderReview(data) {
+    const review = data?.reviewerResult;
+    elements.reviewPanel.hidden = !review;
+    if (!review) return;
+
+    const orders = Array.isArray(data?.appliedOrders) ? data.appliedOrders : [];
+    const runtime = Number(review.watched_runtime_sec);
+    const runtimeLabel = Number.isFinite(runtime) && runtime > 0
+      ? ` · watched ${runtime.toFixed(1)}s`
+      : '';
+    elements.reviewVerdict.textContent =
+      `${review.verdict === 'one_pass' ? 'one pass' : 'ship'}${runtimeLabel}`;
+    elements.reviewersNote.textContent = review.reviewers_note || '';
+
+    elements.reviewFindings.replaceChildren();
+    appendFindingGroup(elements.reviewFindings, 'Pacing', review.pacing_findings);
+    appendFindingGroup(elements.reviewFindings, 'Continuity', review.continuity_findings);
+    appendFindingGroup(elements.reviewFindings, 'Repetition', review.repetition_findings);
+
+    elements.reviewOrders.replaceChildren();
+    if (orders.length) {
+      const heading = document.createElement('h3');
+      heading.textContent = `Orders applied (${orders.length})`;
+      elements.reviewOrders.appendChild(heading);
+      orders.forEach(order => {
+        const item = document.createElement('div');
+        item.className = 'review-order';
+        const title = document.createElement('p');
+        title.className = 'review-order-title';
+        title.textContent = `${String(order.op || 'order').toUpperCase()} position ${order.position} · ${order.detail || ''}`;
+        const reason = document.createElement('p');
+        reason.className = 'review-order-reason';
+        reason.textContent = order.reason || '';
+        const before = document.createElement('p');
+        before.className = 'review-order-line';
+        before.textContent = `before: ${order.before || ''}`;
+        const after = document.createElement('p');
+        after.className = 'review-order-line';
+        after.textContent = `after: ${order.after || ''}`;
+        item.append(title, reason, before, after);
+        elements.reviewOrders.appendChild(item);
+      });
+    }
+
+    const skipped = Array.isArray(data?.skippedOrders) ? data.skippedOrders : [];
+    if (skipped.length) {
+      appendFindingGroup(elements.reviewOrders, 'Orders skipped', skipped);
+    }
+  }
+
   let roughcutLoadedFor = '';
 
   function renderAssembly(data) {
-    const logs = Array.isArray(data?.assemblyLog) ? data.assemblyLog : [];
-    elements.assemblyLog.replaceChildren();
-    logs.slice(-8).forEach(log => {
-      const line = document.createElement('div');
-      line.className = 'assembly-line';
-      line.textContent = log;
-      elements.assemblyLog.appendChild(line);
-    });
+    renderLogLines(elements.assemblyLog, data?.assemblyLog, 'ASSEMBLY', 8);
+    renderLogLines(elements.reviewerLog, data?.reviewerLog, 'REVIEWER', 12);
 
     elements.directorsNote.textContent = data?.directorsNote
       ? `Director's note: ${data.directorsNote}`
       : '';
+
+    renderReview(data);
 
     const cut = data?.roughCut;
     const complete = data?.assemblyStatus === 'complete' && cut;
@@ -267,6 +371,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!complete) {
       roughcutLoadedFor = '';
       return;
+    }
+
+    const isSecondCut = Number(data?.cutVersion) === 2;
+    elements.cutLabel.textContent = isSecondCut
+      ? 'Cut v2 (after review)'
+      : 'Rough cut';
+    elements.downloadRoughcutV1.hidden = !data?.hasRoughCutV1;
+    if (data?.hasRoughCutV1) {
+      elements.downloadRoughcutV1.href =
+        `/api/session/roughcut_v1.mp4?sessionId=${encodeURIComponent(sessionId)}`;
     }
 
     const source = `/api/session/roughcut.mp4?sessionId=${encodeURIComponent(sessionId)}`;
@@ -285,7 +399,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (data?.status === 'completed') {
       elements.assemblyMessage.textContent =
         data?.assemblyStatus === 'complete'
-          ? 'The rough cut is ready. Play it, then take the MP4 or the EDL.'
+          ? (Number(data?.cutVersion) === 2
+              ? 'Cut v2 is ready after the review. Play it, then take the MP4 or the EDL.'
+              : 'The rough cut is ready. Play it, then take the MP4 or the EDL.')
           : 'Assembly complete. Your EDL is ready to download.';
       elements.assemblyMessage.classList.remove('blink');
       elements.assemblyMessage.style.color = 'var(--amber)';
