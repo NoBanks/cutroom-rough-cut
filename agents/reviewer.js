@@ -1,9 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import {
-  generateJSONWithVideo,
-  uploadVideo,
-} from "../artifacts/api-server/src/lib/gemini.js";
+import { analyzeVideo } from "../artifacts/api-server/src/lib/gemini.js";
 
 const PROMPT_PATH = path.join(
   path.dirname(new URL(import.meta.url).pathname),
@@ -344,9 +341,6 @@ export async function runReviewer({
 }) {
   const log = typeof onLog === "function" ? onLog : () => {};
   const prompt = await readReviewerPrompt();
-  log("uploading the rough cut for review");
-  const file = await uploadVideo(roughCutPath);
-  log("watching the cut start to finish");
   const edl = Array.isArray(editorResult?.edl) ? editorResult.edl : [];
   const benched = Array.isArray(editorResult?.unused_strong_moments)
     ? editorResult.unused_strong_moments
@@ -379,11 +373,19 @@ export async function runReviewer({
     "Return only JSON matching this complete output schema:",
     JSON.stringify(REVIEWER_OUTPUT_SCHEMA),
   ].join("\n");
-  const result = await generateJSONWithVideo(
+  // analyzeVideo keeps the upload and the analysis on one key and re-uploads on the next
+  // key when a key is rate limited, so a single key's quota cannot stall the review.
+  const result = await analyzeVideo(
+    roughCutPath,
     prompt,
-    file,
     REVIEWER_OUTPUT_SCHEMA,
     userPayload,
+    (stage) =>
+      log(
+        stage === "uploading"
+          ? "uploading the rough cut for review"
+          : "watching the cut start to finish",
+      ),
   );
   return normalizeReviewerResult(result);
 }

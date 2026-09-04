@@ -1104,13 +1104,13 @@ function statusFromMessages(messages: string[]): number | undefined {
 function apologyFor(stage: string, status: number | undefined): string {
   const where = `The ${stage} was mid-run when it stopped.`;
   if (status === 429) {
-    return `Sorry about this. ${where} Gemini turned the crew away at the door: the API key is out of quota for now. Nothing is wrong with your footage. Wait a few minutes and press Retry, or set a fresh GEMINI_API_KEY and try again.`;
+    return `Sorry about this. ${where} Gemini turned the crew away at the door: the crew rotated through every API key in the pool and each one is out of quota for now. Nothing is wrong with your footage. Wait a few minutes and press Retry, or add fresh keys to GEMINI_API_KEYS and try again.`;
   }
   if (status !== undefined && status >= 500) {
     return `Sorry about this. ${where} Gemini answered with a ${status}, which is a problem on the model's side, not with your footage. The crew waited it out and it did not clear. Press Retry to send the same footage and brief back in.`;
   }
   if (status === 403 || status === 401) {
-    return `Sorry about this. ${where} Gemini refused the API key (${status}). Set a valid GEMINI_API_KEY, then press Retry.`;
+    return `Sorry about this. ${where} Gemini refused the API keys (${status}). Put at least one valid key in GEMINI_API_KEYS, then press Retry.`;
   }
   return `Sorry about this. ${where} The crew could not finish and stopped rather than hand you a broken cut. Press Retry to send the same footage and brief back in.`;
 }

@@ -58,15 +58,21 @@ craft rules are editable without touching code.
    deterministically in code; invalid orders are logged as skipped. There is never a
    second review pass.
 
-**Models:** `gemini-3-flash-preview`, falling back to `gemini-3.1-flash-lite`, all through
-the `@google/genai` SDK. That SDK is the only AI dependency in the project.
+**Models:** `gemini-3.8-flash`, falling back to `gemini-3.5-flash-lite`, all through
+the `@google/genai` SDK. That SDK is the only AI dependency in the project. Both are
+overridable without a code edit via `CUTROOM_MODEL_PRIMARY` and `CUTROOM_MODEL_FALLBACK`.
 
 ---
 
 ## Running it
 
-**Required secret:** `GEMINI_API_KEY` - a Google AI Studio API key. Set it in the Replit
-Secrets pane. It is read from the environment and never written to disk or logged.
+**Required secret:** `GEMINI_API_KEYS` - one or more Google AI Studio API keys, separated
+by commas, whitespace or newlines. Set it in the Replit Secrets pane. Keys are read from
+the environment and never written to disk or logged; logs refer to a key by its position
+in the pool only. The crew round-robins across the pool and rotates to the next key on a
+rate limit or a quota error, so one key's ceiling cannot stall a session. A key that hits
+a per-day quota is benched for the day rather than retried every minute. The older
+single-key `GEMINI_API_KEY` still works and is read as a pool of one.
 
 **System dependency:** ffmpeg / ffprobe must be declared for the deployment, not only
 present in dev. In this repo that is `packages = ["ffmpeg"]` under `[nix]` in `.replit`.

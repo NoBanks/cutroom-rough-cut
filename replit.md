@@ -27,7 +27,7 @@ CUTROOM is a temporary-session virtual cutting room for turning raw video clips 
 - Sessions use an HTTP-only crypto-random cookie and in-memory metadata; clip bytes live only under a matching temporary directory.
 - Accepted clip sets are probed with ffprobe and committed with an `inventory.json`; failed probes are rejected without replacing the prior session state.
 - Total clip runtime is capped at 30 minutes, while clips over 5 minutes are accepted and flagged for sampling.
-- Google Gemini is CUTROOM's only AI provider. Use the official `@google/genai` SDK with `GEMINI_API_KEY`; never add another AI provider SDK.
+- Google Gemini is CUTROOM's only AI provider. Use the official `@google/genai` SDK with the `GEMINI_API_KEYS` pool (`GEMINI_API_KEY` still works as a pool of one); never add another AI provider SDK.
 - Gemini JSON generation, Files API video uploads, retry/fallback behavior, and cached health checks stay centralized in the API server's single Gemini module.
 - The app intentionally avoids accounts, a database, AI/model calls, and payments for this milestone.
 - Sample footage is copied into the current session so the sample path behaves like uploaded footage.

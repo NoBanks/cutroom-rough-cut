@@ -25,4 +25,16 @@ export function generateJSONWithVideo(
   userPayload?: string,
 ): Promise<GeminiJSON>;
 
+export function analyzeVideo(
+  filePath: string,
+  systemPrompt: string,
+  schemaHint?: unknown,
+  userPayload?: string,
+  onStage?: (stage: "uploading" | "analyzing") => void,
+): Promise<GeminiJSON>;
+
+export function getGeminiModels(): { primary: string; fallback: string };
+
+export function getGeminiKeyPoolSize(): number;
+
 export function getGeminiHealth(): Promise<"ok" | "error">;

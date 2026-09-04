@@ -2,10 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import {
-  generateJSONWithVideo,
-  uploadVideo,
-} from "../artifacts/api-server/src/lib/gemini.js";
+import { analyzeVideo } from "../artifacts/api-server/src/lib/gemini.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_ANALYSIS_SECONDS = 5 * 60;
@@ -212,8 +209,6 @@ async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) 
         Number(inventory.duration_seconds),
         sessionDir,
       );
-      const file = await uploadVideo(prepared.filePath);
-      onProgress({ state: "analyzing", attempt, message: `analyzing ${inventory.filename}` });
       const prompt = await readSelectorPrompt();
       const userPayload = [
         "SELECTOR TASK",
@@ -225,11 +220,19 @@ async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) 
         "Return only JSON matching this complete output schema:",
         JSON.stringify(SELECTOR_OUTPUT_SCHEMA),
       ].join("\n");
-      const result = await generateJSONWithVideo(
+      // analyzeVideo keeps the upload and the analysis on one key and re-uploads on the
+      // next key when a key is rate limited, so a single key's quota cannot stall the crew.
+      const result = await analyzeVideo(
+        prepared.filePath,
         prompt,
-        file,
         SELECTOR_OUTPUT_SCHEMA,
         userPayload,
+        (stage) =>
+          onProgress({
+            state: stage,
+            attempt,
+            message: `${stage} ${inventory.filename}`,
+          }),
       );
       const normalized = normaliseResult(result, prepared.analysisDuration);
       if (inventory.duration_seconds > MAX_ANALYSIS_SECONDS) {
