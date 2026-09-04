@@ -15,6 +15,23 @@ const MAX_FILES = 10;
 const MAX_TOTAL_BYTES = 200 * 1024 * 1024;
 const MAX_RUNTIME_SECONDS = 30 * 60;
 const LONG_CLIP_SECONDS = 5 * 60;
+// An empty brief is not an error. The crew is given a house default so the
+// session still produces a cut, and the director log says so out loud.
+const DEFAULT_BRIEF = "cut the best 45 seconds from this footage";
+// Temp session directories are swept on a timer. Nothing here is meant to
+// outlive a working session.
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const SESSION_SWEEP_MS = 60 * 60 * 1000;
+// Browsers send video/quicktime for .mov and occasionally an empty type or
+// application/octet-stream for a file dragged off an external drive. Anything
+// that names itself as a non-video type is rejected before a byte is probed.
+const ALLOWED_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/x-m4v",
+  "application/octet-stream",
+  "application/mp4",
+]);
 const SESSION_COOKIE = "cutroom_session";
 const currentDirectory = process.cwd();
 const workspaceRoot =
@@ -197,6 +214,15 @@ interface SessionState {
   cutVersion: number;
   roughCutV1?: RoughCut;
   editorResultV1?: EditorResult;
+  runFailure?: RunFailure;
+  briefDefaulted: boolean;
+  lastTouchedAt: number;
+}
+
+interface RunFailure {
+  stage: string;
+  message: string;
+  retryable: boolean;
 }
 
 interface SessionRequest extends Request {
@@ -236,6 +262,8 @@ function createSession(): SessionState {
     appliedOrders: [],
     skippedOrders: [],
     cutVersion: 1,
+    briefDefaulted: false,
+    lastTouchedAt: Date.now(),
   };
   sessions.set(id, session);
   return session;
@@ -322,6 +350,9 @@ function serializeSession(session: SessionState) {
     appliedOrders: session.appliedOrders,
     skippedOrders: session.skippedOrders,
     cutVersion: session.cutVersion,
+    runFailure: session.runFailure,
+    canRetry: Boolean(session.runFailure?.retryable) && session.clips.length > 0,
+    briefDefaulted: session.briefDefaulted,
     hasRoughCutV1: Boolean(session.roughCutV1),
     roughCutV1: session.roughCutV1
       ? {
@@ -597,6 +628,7 @@ function resetCreativeState(session: SessionState) {
   session.cutVersion = 1;
   session.roughCutV1 = undefined;
   session.editorResultV1 = undefined;
+  session.runFailure = undefined;
   resetSelectorState(session);
 }
 
@@ -709,16 +741,39 @@ async function startSelector(
         : `selector complete; ${result.moments.length} moments in inventory`,
     );
     await writeSelects(session, result);
-    if (!result.partial) {
-      await startEditor(session);
-    } else {
+    if (result.partial) {
       editorLog(session, "editor skipped because the selector had clip errors");
+      failRun(
+        session,
+        "selector",
+        statusFromMessages(result.errors),
+        selectorLog,
+      );
+      return;
     }
+    // The selector drops dead shots on the floor, so zero moments means the
+    // footage held nothing worth cutting. That is an answer, not a crash.
+    if (result.moments.length === 0) {
+      session.status = "error";
+      session.runFailure = {
+        stage: "selector",
+        message:
+          "The crew watched every clip and could not find a single usable moment. Every shot read as a dead shot: static frames, black, or nothing happening on camera. Try footage with visible action in it, or press Retry with a different brief.",
+        retryable: true,
+      };
+      selectorLog(
+        session,
+        "no usable moments in this footage; every shot read as a dead shot",
+      );
+      editorLog(session, "editor skipped; there is nothing to cut");
+      return;
+    }
+    await startEditor(session);
   } catch (error) {
     session.selectorStatus = "error";
-    session.status = "error";
     session.selectorError = "The selector could not complete.";
     selectorLog(session, "selector stopped unexpectedly");
+    failRun(session, "selector", statusFromError(error), selectorLog);
     const result: SelectorResult = {
       generated_at: new Date().toISOString(),
       intent: {},
@@ -772,6 +827,11 @@ async function startAssembly(session: SessionState) {
         ? error.message
         : "The rough cut could not be rendered.";
     assemblyLog(session, session.assemblyError);
+    session.runFailure = {
+      stage: "assembly",
+      message: `Sorry about this. The render stopped before the cut was finished: ${session.assemblyError} The EDL above is still yours. Press Retry to send the same footage and brief back in.`,
+      retryable: true,
+    };
     console.error("CUTROOM assembly failed", error);
   }
   return { started: true, busy: false } as const;
@@ -907,6 +967,7 @@ async function startReviewer(session: SessionState) {
       session.assemblyStatus = "complete";
       session.reviewerStatus = "complete";
       session.status = "completed";
+      session.runFailure = undefined;
       reviewerLog(
         session,
         "the second render failed; the first cut stands as delivered",
@@ -962,10 +1023,10 @@ async function startEditor(session: SessionState) {
     }
   } catch (error) {
     session.editorStatus = "error";
-    session.status = "error";
     session.editorError =
       error instanceof Error ? error.message : "The editor could not complete.";
     editorLog(session, session.editorError);
+    failRun(session, "editor", statusFromError(error), editorLog);
     console.error("CUTROOM editor failed", error);
   }
 }
@@ -1010,11 +1071,61 @@ async function startCreativePipeline(session: SessionState) {
     await startSelector(session, result.intent);
   } catch (error) {
     session.directorStatus = "error";
-    session.status = "error";
     session.directorError = "The director could not interpret this brief.";
     directorLog(session, session.directorError);
+    failRun(session, "director", statusFromError(error), directorLog);
     console.error("CUTROOM director failed", error);
   }
+}
+
+// Gemini errors reach the route layer either as an Error carrying a numeric
+// status (the lib/gemini.js wrapper sets it) or, from the selector, as a
+// per-clip string shaped "ApiError/429". Both shapes are read here so a quota
+// wall and a 5xx wave get their own apology instead of a white screen.
+function statusFromError(error: unknown): number | undefined {
+  const candidate = error as { status?: unknown; code?: unknown } | undefined;
+  const value = [candidate?.status, candidate?.code]
+    .map(Number)
+    .find((entry) => Number.isFinite(entry) && entry >= 100 && entry <= 599);
+  if (value !== undefined) return value;
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  const match = text.match(/\b(4\d\d|5\d\d)\b/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function statusFromMessages(messages: string[]): number | undefined {
+  for (const message of messages) {
+    const match = message.match(/\/(4\d\d|5\d\d)\b/);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function apologyFor(stage: string, status: number | undefined): string {
+  const where = `The ${stage} was mid-run when it stopped.`;
+  if (status === 429) {
+    return `Sorry about this. ${where} Gemini turned the crew away at the door: the API key is out of quota for now. Nothing is wrong with your footage. Wait a few minutes and press Retry, or set a fresh GEMINI_API_KEY and try again.`;
+  }
+  if (status !== undefined && status >= 500) {
+    return `Sorry about this. ${where} Gemini answered with a ${status}, which is a problem on the model's side, not with your footage. The crew waited it out and it did not clear. Press Retry to send the same footage and brief back in.`;
+  }
+  if (status === 403 || status === 401) {
+    return `Sorry about this. ${where} Gemini refused the API key (${status}). Set a valid GEMINI_API_KEY, then press Retry.`;
+  }
+  return `Sorry about this. ${where} The crew could not finish and stopped rather than hand you a broken cut. Press Retry to send the same footage and brief back in.`;
+}
+
+function failRun(
+  session: SessionState,
+  stage: string,
+  status: number | undefined,
+  log: (session: SessionState, message: string) => void,
+) {
+  const message = apologyFor(stage, status);
+  session.runFailure = { stage, message, retryable: true };
+  session.status = "error";
+  log(session, message);
+  return message;
 }
 
 function rejectedMessages(rejected: RejectedClip[]) {
@@ -1024,6 +1135,7 @@ function rejectedMessages(rejected: RejectedClip[]) {
 router.use(async (req: SessionRequest, res, next) => {
   try {
     const session = getSession(req, res);
+    session.lastTouchedAt = Date.now();
     await fs.mkdir(session.dir, { recursive: true });
     await fs.mkdir(SAMPLE_DIR, { recursive: true });
     next();
@@ -1051,7 +1163,20 @@ const upload = multer({
   limits: { files: MAX_FILES, fileSize: MAX_TOTAL_BYTES },
   fileFilter: (_req, file, callback) => {
     if (!isVideoFile(file.originalname)) {
-      callback(new Error("Only .mp4 and .mov files are accepted."));
+      callback(
+        new Error(
+          `${safeName(file.originalname)} is not a .mp4 or .mov file. Only .mp4 and .mov footage is accepted.`,
+        ),
+      );
+      return;
+    }
+    const mimeType = (file.mimetype || "").toLowerCase().split(";")[0].trim();
+    if (mimeType && !ALLOWED_MIME_TYPES.has(mimeType)) {
+      callback(
+        new Error(
+          `${safeName(file.originalname)} arrived as ${mimeType}, which is not video. Only .mp4 and .mov footage is accepted.`,
+        ),
+      );
       return;
     }
     callback(null, true);
@@ -1368,16 +1493,14 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
     return errorResponse(res, 400, "Add footage before sending a brief.");
   }
 
-  const brief = typeof req.body?.brief === "string" ? req.body.brief.trim() : "";
+  const requestedBrief =
+    typeof req.body?.brief === "string" ? req.body.brief.trim() : "";
   const preset =
     typeof req.body?.preset === "string" ? req.body.preset.trim() : "";
-  if (!brief && !preset) {
-    return errorResponse(
-      res,
-      400,
-      "Tell the crew what you want, or choose a preset.",
-    );
-  }
+  // An empty brief is a valid brief. The crew takes the house default and the
+  // director log tells the user exactly what it is cutting to.
+  const briefDefaulted = !requestedBrief && !preset;
+  const brief = briefDefaulted ? DEFAULT_BRIEF : requestedBrief;
   if (
     session.directorAttempted ||
     session.selectorStatus === "running" ||
@@ -1392,7 +1515,15 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
   session.preset = preset;
   session.status = "assembling";
   resetCreativeState(session);
+  session.briefDefaulted = briefDefaulted;
+  session.lastTouchedAt = Date.now();
   await clearGeneratedFiles(session);
+  if (briefDefaulted) {
+    directorLog(
+      session,
+      `no brief was given, so the crew is working to the house default: ${DEFAULT_BRIEF}`,
+    );
+  }
   if (!session.crewStatusAttempted) {
     session.crewStatusAttempted = true;
     try {
@@ -1421,6 +1552,46 @@ router.post("/session/brief", async (req: SessionRequest, res) => {
   return res.json(serializeSession(session));
 });
 
+// Retry re-runs the creative pipeline on the footage and brief already in the
+// session. It exists so a quota wall or a 5xx wave costs the user one click
+// instead of a re-upload.
+router.post("/session/retry", async (req: SessionRequest, res, next) => {
+  try {
+    const session = getSession(req, res);
+    if (session.clips.length === 0) {
+      return errorResponse(res, 400, "Add footage before retrying.");
+    }
+    if (!session.brief && !session.preset) {
+      return errorResponse(res, 400, "Send a brief before retrying.");
+    }
+    if (
+      session.directorStatus === "running" ||
+      session.selectorStatus === "running" ||
+      session.editorStatus === "running" ||
+      session.assemblyStatus === "running"
+    ) {
+      return errorResponse(res, 409, "The crew is still working. Give it a moment.");
+    }
+    const briefDefaulted = session.briefDefaulted;
+    resetCreativeState(session);
+    session.briefDefaulted = briefDefaulted;
+    session.status = "assembling";
+    session.lastTouchedAt = Date.now();
+    await clearGeneratedFiles(session);
+    if (briefDefaulted) {
+      directorLog(
+        session,
+        `no brief was given, so the crew is working to the house default: ${DEFAULT_BRIEF}`,
+      );
+    }
+    directorLog(session, "retrying this session with the same footage and brief");
+    void startCreativePipeline(session);
+    return res.json(serializeSession(session));
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.post("/session/reset", async (req: SessionRequest, res, next) => {
   try {
     const active = getSession(req, res);
@@ -1437,3 +1608,41 @@ router.post("/session/reset", async (req: SessionRequest, res, next) => {
 });
 
 export default router;
+
+// Sessions are temporary by design. Every hour, any temp directory whose last
+// write is older than the 24h TTL is removed along with its in-memory state, so
+// a long-lived deployment never accumulates footage. unref keeps the timer from
+// holding the process open.
+async function sweepExpiredSessions(now = Date.now()) {
+  let removed = 0;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(TEMP_DIR);
+  } catch {
+    return removed;
+  }
+  for (const entry of entries) {
+    const dir = path.join(TEMP_DIR, entry);
+    try {
+      const stats = await fs.stat(dir);
+      if (!stats.isDirectory()) continue;
+      if (now - stats.mtimeMs < SESSION_TTL_MS) continue;
+      await fs.rm(dir, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      continue;
+    }
+  }
+  for (const [id, session] of sessions) {
+    if (now - session.lastTouchedAt >= SESSION_TTL_MS) sessions.delete(id);
+  }
+  return removed;
+}
+
+const sessionSweeper = setInterval(() => {
+  void sweepExpiredSessions();
+}, SESSION_SWEEP_MS);
+sessionSweeper.unref();
+void sweepExpiredSessions();
+
+export { sweepExpiredSessions };

@@ -733,18 +733,150 @@ textarea::placeholder {
   to { transform: rotate(360deg); }
 }
 
+/* The failure panel is the only thing on screen that is allowed to shout. It
+   carries the apology and the one click that restarts the run. */
+.run-failure {
+  border: 1px solid var(--error);
+  border-radius: 2px;
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+}
+
+.run-failure[hidden] {
+  display: none;
+}
+
+.run-failure-message {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.run-failure-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.run-failure-actions .primary-btn {
+  width: auto;
+}
+
+.run-failure-actions .primary-btn[hidden] {
+  display: none;
+}
+
+.ghost-btn {
+  background: none;
+  border: 1px solid var(--text-muted);
+  border-radius: 2px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 1rem 1.25rem;
+}
+
+.ghost-btn:hover:not(:disabled) {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+/* Phone layout. The rule the whole screen depends on: nothing grows the page
+   sideways. Wide tables and long logs scroll inside their own containers, so
+   the body never gets a horizontal scrollbar. Never use scrollIntoView to move
+   a panel; it scrolls the page, not the panel. */
 @media (max-width: 640px) {
+  body {
+    overflow-x: hidden;
+  }
+
   .container {
     padding: 2rem 1rem;
   }
-  
+
   .dropzone {
     padding: 2.5rem 1rem;
+  }
+
+  .terminal {
+    border-left-width: 2px;
+    padding: 1.5rem 1rem;
   }
 
   .moment-heading {
     align-items: flex-start;
     flex-direction: column;
     gap: 0.35rem;
+  }
+
+  .moment-table-wrap {
+    -webkit-overflow-scrolling: touch;
+    max-height: 20rem;
+    overflow-x: auto;
+    overflow-y: auto;
+  }
+
+  .moment-table-wrap table {
+    min-width: 620px;
+  }
+
+  .moment-table-wrap th,
+  .moment-table-wrap td {
+    font-size: 0.72rem;
+    padding: 0.5rem 0.45rem;
+  }
+
+  .director-log,
+  .selector-log,
+  .editor-log,
+  .assembly-log,
+  .reviewer-log {
+    -webkit-overflow-scrolling: touch;
+    max-height: 10rem;
+  }
+
+  .log-entry {
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .log-message {
+    flex-basis: 100%;
+  }
+
+  .inventory-line {
+    font-size: 0.72rem;
+  }
+
+  .edl-downloads {
+    flex-wrap: wrap;
+  }
+
+  .run-failure-actions .primary-btn,
+  .run-failure-actions .ghost-btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  h1 {
+    font-size: 1.05rem;
+  }
+
+  .tagline {
+    font-size: 1rem;
+  }
+
+  .terminal {
+    padding: 1.25rem 0.75rem;
+  }
+
+  .container {
+    padding: 1.5rem 0.75rem;
   }
 }

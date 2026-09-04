@@ -139,6 +139,16 @@
             <div id="unused-moments" class="unused-moments"></div>
           </section>
           <p id="assembly-message" class="log-text blink">The crew is assembling...</p>
+          <div id="run-failure" class="run-failure" role="alert" hidden>
+            <p id="run-failure-message" class="run-failure-message"></p>
+            <div class="run-failure-actions">
+              <button id="btn-retry" class="primary-btn" type="button">
+                <span class="btn-text">Retry</span>
+              </button>
+              <button id="btn-start-over" class="ghost-btn" type="button">Start over with new footage</button>
+            </div>
+            <p id="retry-error" class="error-msg" aria-live="polite"></p>
+          </div>
         </div>
       </div>
     </section>

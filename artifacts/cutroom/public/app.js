@@ -49,14 +49,20 @@ document.addEventListener('DOMContentLoaded', () => {
     reviewOrders: document.getElementById('review-orders'),
     downloadRoughcutV1: document.getElementById('download-roughcut-v1'),
     downloadRoughcut: document.getElementById('download-roughcut'),
-    unusedMoments: document.getElementById('unused-moments')
+    unusedMoments: document.getElementById('unused-moments'),
+    runFailure: document.getElementById('run-failure'),
+    runFailureMessage: document.getElementById('run-failure-message'),
+    btnRetry: document.getElementById('btn-retry'),
+    btnStartOver: document.getElementById('btn-start-over'),
+    retryError: document.getElementById('retry-error')
   };
 
   // --- Constants ---
   const MAX_FILES = 10;
   const MAX_SIZE_MB = 200;
   const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
-  const VALID_TYPES = ['video/mp4', 'video/quicktime'];
+  const VALID_TYPES = ['video/mp4', 'video/quicktime', 'video/x-m4v'];
+  const NEUTRAL_TYPES = ['application/octet-stream', 'application/mp4'];
 
   // --- State Management ---
   // Create or retrieve session identifier
@@ -208,12 +214,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const values = [
         moment.filename || moment.clip_id || 'unknown',
         `${formatDuration(moment.start_sec)} → ${formatDuration(moment.end_sec)}`,
-        moment.action || '—',
-        [moment.shot_size, moment.camera_motion].filter(Boolean).join(' · ') || '—',
+        moment.action || '-',
+        [moment.shot_size, moment.camera_motion].filter(Boolean).join(' · ') || '-',
         Number.isFinite(Number(moment.intent_score))
           ? `${Math.round(Number(moment.intent_score) * 100)}%`
-          : '—',
-        moment.notes || '—'
+          : '-',
+        moment.notes || '-'
       ];
       values.forEach(value => {
         const cell = document.createElement('td');
@@ -245,12 +251,12 @@ document.addEventListener('DOMContentLoaded', () => {
     edits.forEach(edit => {
       const row = document.createElement('tr');
       const values = [
-        edit.edit_index || '—',
+        edit.edit_index || '-',
         edit.filename || edit.clip_id || 'unknown',
         `${formatDuration(edit.source_start_sec)} → ${formatDuration(edit.source_end_sec)}`,
         formatDuration(edit.duration_sec),
-        edit.role || '—',
-        edit.action || '—'
+        edit.role || '-',
+        edit.action || '-'
       ];
       values.forEach(value => {
         const cell = document.createElement('td');
@@ -395,7 +401,17 @@ document.addEventListener('DOMContentLoaded', () => {
       `${cut.shots} shots · ${cut.durationSec}s · ${fps} · ${cut.height}p · ${cut.videoCodec}/${cut.audioCodec} · ${megabytes.toFixed(1)}MB`;
   }
 
+  function renderRunFailure(data) {
+    const failure = data && data.runFailure;
+    const show = Boolean(failure && failure.message);
+    elements.runFailure.hidden = !show;
+    if (!show) return;
+    elements.runFailureMessage.textContent = failure.message;
+    elements.btnRetry.hidden = !data.canRetry;
+  }
+
   function renderAssemblyMessage(data) {
+    renderRunFailure(data);
     if (data?.status === 'completed') {
       elements.assemblyMessage.textContent =
         data?.assemblyStatus === 'complete'
@@ -505,7 +521,7 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.uploadError.textContent = '';
     
     if (files.length > MAX_FILES) {
-      elements.uploadError.textContent = `Maximum ${MAX_FILES} files allowed.`;
+      elements.uploadError.textContent = `A session can contain up to ${MAX_FILES} clips. You picked ${files.length}.`;
       elements.fileInput.value = '';
       return;
     }
@@ -516,11 +532,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const isMacMP4 = file.name.toLowerCase().endsWith('.mp4');
-      const isMacMOV = file.name.toLowerCase().endsWith('.mov');
-      
-      if (!VALID_TYPES.includes(file.type) && !isMacMP4 && !isMacMOV) {
-        elements.uploadError.textContent = 'Only .mp4 or .mov files are accepted.';
+      const name = file.name.toLowerCase();
+      const hasVideoExtension = name.endsWith('.mp4') || name.endsWith('.mov');
+      const type = (file.type || '').toLowerCase().split(';')[0].trim();
+
+      if (!hasVideoExtension) {
+        elements.uploadError.textContent = `${file.name} is not a .mp4 or .mov file. Only .mp4 or .mov footage is accepted.`;
+        elements.fileInput.value = '';
+        return;
+      }
+      // A browser that reports a type has to report a video one. An empty type
+      // or octet-stream (common for files dragged off an external drive) still
+      // gets probed with ffprobe on the server.
+      if (type && !VALID_TYPES.includes(type) && !NEUTRAL_TYPES.includes(type)) {
+        elements.uploadError.textContent = `${file.name} is a ${type} file, not video. Only .mp4 or .mov footage is accepted.`;
+        elements.fileInput.value = '';
+        return;
+      }
+      if (file.size > MAX_SIZE_BYTES) {
+        elements.uploadError.textContent = `${file.name} is larger than the ${MAX_SIZE_MB}MB session limit.`;
         elements.fileInput.value = '';
         return;
       }
@@ -529,7 +559,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (totalSize > MAX_SIZE_BYTES) {
-      elements.uploadError.textContent = `Total file size exceeds ${MAX_SIZE_MB}MB limit.`;
+      elements.uploadError.textContent = `That footage is ${(totalSize / (1024 * 1024)).toFixed(0)}MB, over the ${MAX_SIZE_MB}MB session limit.`;
       elements.fileInput.value = '';
       return;
     }
@@ -582,11 +612,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   elements.btnSendBrief.addEventListener('click', async () => {
     const brief = elements.briefInput.value.trim();
-    if (!brief && !selectedPreset) {
-      elements.briefError.textContent = 'Tell the crew what you want, or choose a preset.';
-      return;
-    }
-
+    // An empty brief is allowed. The server falls back to the house default
+    // and the director log says which default it took.
     elements.briefError.textContent = '';
     setLoading(elements.btnSendBrief, true);
 
@@ -666,6 +693,62 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 2000);
   }
 
+  // --- Failure recovery ---
+
+  elements.btnRetry.addEventListener('click', async () => {
+    elements.retryError.textContent = '';
+    setLoading(elements.btnRetry, true);
+    try {
+      const res = await fetch('/api/session/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'The retry could not start. Try again in a moment.');
+      }
+      const data = await res.json();
+      elements.runFailure.hidden = true;
+      elements.logText.style.color = '';
+      renderDirector(data);
+      renderSelector(data);
+      renderEditor(data);
+      renderAssembly(data);
+      renderAssemblyMessage(data);
+      startStatusPolling();
+    } catch (err) {
+      elements.retryError.textContent = err.message;
+    } finally {
+      setLoading(elements.btnRetry, false);
+    }
+  });
+
+  elements.btnStartOver.addEventListener('click', async () => {
+    elements.retryError.textContent = '';
+    setLoading(elements.btnStartOver, true);
+    try {
+      const res = await fetch('/api/session/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      });
+      if (!res.ok) throw new Error('Could not clear this session. Reload the page.');
+      const data = await res.json();
+      sessionId = data.sessionId || data.id || sessionId;
+      sessionStorage.setItem('cutroom_session_id', sessionId);
+      if (pollInterval) clearInterval(pollInterval);
+      elements.runFailure.hidden = true;
+      elements.uploadError.textContent = '';
+      elements.logText.style.color = '';
+      switchState('landing');
+    } catch (err) {
+      elements.retryError.textContent = err.message;
+    } finally {
+      setLoading(elements.btnStartOver, false);
+    }
+  });
+
   // --- Initialization ---
   async function init() {
     try {
@@ -684,6 +767,15 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.status === 'assembling') {
           switchState('assembly');
           startStatusPolling();
+          return;
+        } else if (data.status === 'error' || data.status === 'completed') {
+          // A reload after a failed or finished run belongs in the cutting
+          // room, with the log, the apology and the retry button, not back on
+          // the brief screen with no explanation.
+          switchState('assembly');
+          if (data.status === 'error') {
+            elements.logText.style.color = 'var(--error)';
+          }
           return;
         } else if (data.clipCount > 0) {
           switchState('brief');
