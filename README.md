@@ -74,6 +74,13 @@ rate limit or a quota error, so one key's ceiling cannot stall a session. A key 
 a per-day quota is benched for the day rather than retried every minute. The older
 single-key `GEMINI_API_KEY` still works and is read as a pool of one.
 
+**Optional render knobs:** `CUTROOM_RENDER_MAX_HEIGHT` caps the output canvas height
+(default 1080). The render never upscales, so the canvas is the tallest source in the EDL
+capped by this number; 720p phone footage renders on a 1280x720 canvas either way, and a
+slow deployment box can pin the ceiling lower. `CUTROOM_RENDER_TIMEOUT_MS` is the budget
+for one render (default 600000, ten minutes). Chunk 7 renders twice per session, an
+initial cut then an improved one, and each render gets its own full budget.
+
 **System dependency:** ffmpeg / ffprobe must be declared for the deployment, not only
 present in dev. In this repo that is `packages = ["ffmpeg"]` under `[nix]` in `.replit`.
 The deployment image does not inherit dev-only system packages; this was a real bug we
