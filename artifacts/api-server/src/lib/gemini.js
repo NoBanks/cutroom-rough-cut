@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import fs from "node:fs/promises";
 import path from "node:path";
 
 // Model choice lives here and only here. Override without a code edit via env.
@@ -14,6 +15,10 @@ const FILE_POLL_ATTEMPTS = 30;
 const MAX_KEYS_PER_REQUEST = 12;
 const RATE_COOLDOWN_MS = 60_000;
 const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// Files API objects auto-delete 48 hours after upload (official docs). A cached upload is
+// trusted for 40 hours and re-verified with files.get before every reuse, so a file that
+// vanished early costs one cheap GET and a fresh upload, never a failed analysis.
+const UPLOAD_CACHE_TTL_MS = 40 * 60 * 60 * 1000;
 
 let healthCache = { checkedAt: 0, status: "error" };
 let healthInFlight;
@@ -24,6 +29,12 @@ let poolSource = "";
 let poolKeys = [];
 const cooldownUntil = new Map();
 let cursor = 0;
+// PRE-JUDGING PASS 2026-09-09: a file lives in the Files store of the key that uploaded
+// it, so the cache is keyed by key POSITION plus the file's path, size and mtime. A key
+// that is rotated back to (selector retry loop, model fallback pass, a second review
+// attempt) reuses its upload instead of pushing the whole video up again. Only a change
+// of key forces a re-upload. Cleared whenever the pool itself changes.
+const uploadCache = new Map();
 
 // OPSEC: keys are referenced by 1-based position only. A key VALUE is never logged,
 // returned, or put in an error message. Ryan livestreams. Do not weaken this.
@@ -49,6 +60,7 @@ function pool() {
     poolSource = raw;
     poolKeys = parseKeyPool(raw);
     cooldownUntil.clear();
+    uploadCache.clear();
   }
   if (poolKeys.length === 0) {
     throw new Error("Gemini is not configured.");
@@ -175,24 +187,66 @@ function cleanError(source) {
   return error;
 }
 
-// Runs `attempt(client, index)` and rotates to a DIFFERENT key on any transient error.
-// A key is never retried inside the same request.
-async function withKeyRotation(attempt) {
+function cooldownShape(error) {
+  if (isRejectedKey(error)) return "rejected";
+  if (isDailyQuota(error)) return "daily quota";
+  return "rate limited";
+}
+
+// Runs `attempt(client, index, info)` and rotates to a DIFFERENT key on any transient
+// error. A key is never retried inside the same request.
+// options.preferKeyIndex: try this key first when it is not cooling (the selector uses
+//   it so an analysis lands on the key that already holds the upload).
+// options.budget: a shared attempt counter ({ used, max }) so a caller can cap the total
+//   number of attempts across the primary and fallback passes; when the cap is reached
+//   the thrown error carries attemptsExhausted = true and attempts = the count.
+// options.onRotate(index, shape): called before rotating past a failed key.
+async function withKeyRotation(attempt, options = {}) {
   const keys = pool();
-  const budget = Math.min(keys.length, MAX_KEYS_PER_REQUEST);
+  const perPass = Math.min(keys.length, MAX_KEYS_PER_REQUEST);
+  const budget = options.budget;
   const skip = new Set();
   let lastError;
-  for (let tries = 0; tries < budget; tries += 1) {
-    const index = nextKeyIndex(skip);
+  let preferred =
+    Number.isInteger(options.preferKeyIndex) &&
+    options.preferKeyIndex >= 0 &&
+    options.preferKeyIndex < keys.length
+      ? options.preferKeyIndex
+      : undefined;
+  for (let tries = 0; tries < perPass; tries += 1) {
+    if (budget && budget.used >= budget.max) {
+      const error = lastError || new Error("Gemini request failed.");
+      error.attemptsExhausted = true;
+      error.attempts = budget.used;
+      throw error;
+    }
+    let index;
+    if (preferred !== undefined && !skip.has(preferred) && !isCooling(preferred, Date.now())) {
+      index = preferred;
+    } else {
+      index = nextKeyIndex(skip);
+    }
+    preferred = undefined;
     if (index === undefined) break;
     skip.add(index);
+    if (budget) budget.used += 1;
     try {
-      return await attempt(clientForIndex(index), index);
+      return await attempt(clientForIndex(index), index, {
+        attempt: budget ? budget.used : tries + 1,
+        maxAttempts: budget ? budget.max : perPass,
+      });
     } catch (error) {
       lastError = error;
       if (!isKeyError(error)) throw error;
+      if (typeof options.onRotate === "function") {
+        options.onRotate(index, cooldownShape(error));
+      }
       markCooling(index, error);
     }
+  }
+  if (lastError && budget && budget.used >= budget.max) {
+    lastError.attemptsExhausted = true;
+    lastError.attempts = budget.used;
   }
   throw lastError || new Error("Gemini request failed.");
 }
@@ -248,13 +302,54 @@ export async function generateJSON(systemPrompt, userContent, schemaHint) {
   }
 }
 
-async function uploadWithClient(ai, filePath) {
+async function uploadCacheKey(index, filePath) {
+  const stat = await fs.stat(filePath);
+  return `${index}\u0000${path.resolve(filePath)}\u0000${stat.size}\u0000${Math.round(stat.mtimeMs)}`;
+}
+
+// Returns the cached ACTIVE file for this key and path, or undefined. The entry is
+// verified with files.get so a file the store dropped early is never handed to a model.
+async function cachedUpload(ai, index, cacheKey) {
+  const entry = uploadCache.get(cacheKey);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > UPLOAD_CACHE_TTL_MS || !entry.file?.name) {
+    uploadCache.delete(cacheKey);
+    return undefined;
+  }
+  try {
+    const fresh = await ai.files.get({ name: entry.file.name });
+    if (fresh?.state === "ACTIVE" && fresh.uri) {
+      Object.defineProperty(fresh, FILE_CLIENT, { value: ai, enumerable: false });
+      return fresh;
+    }
+  } catch {
+    // Not found, expired, or a transient blip: fall through to a fresh upload.
+  }
+  uploadCache.delete(cacheKey);
+  return undefined;
+}
+
+// Uploads filePath under the client at pool position `index`, reusing a cached upload
+// when this key already holds the file. The result carries a non-enumerable `reused`
+// flag so callers can say which happened without a second code path.
+async function uploadWithClient(ai, filePath, index) {
+  const cacheKey =
+    Number.isInteger(index) ? await uploadCacheKey(index, filePath) : undefined;
+  if (cacheKey) {
+    const cached = await cachedUpload(ai, index, cacheKey);
+    if (cached) {
+      Object.defineProperty(cached, "reused", { value: true, enumerable: false });
+      return cached;
+    }
+  }
   const extension = path.extname(filePath).toLowerCase();
   const mimeType = extension === ".mov" ? "video/quicktime" : "video/mp4";
   let file = await ai.files.upload({ file: filePath, config: { mimeType } });
   for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt += 1) {
     if (file.state === "ACTIVE") {
       Object.defineProperty(file, FILE_CLIENT, { value: ai, enumerable: false });
+      Object.defineProperty(file, "reused", { value: false, enumerable: false });
+      if (cacheKey) uploadCache.set(cacheKey, { file, at: Date.now() });
       return file;
     }
     if (file.state === "FAILED" || !file.name) {
@@ -278,7 +373,9 @@ function wrapUploadError(error) {
 
 export async function uploadVideo(filePath) {
   try {
-    return await withKeyRotation((client) => uploadWithClient(client, filePath));
+    return await withKeyRotation((client, index) =>
+      uploadWithClient(client, filePath, index),
+    );
   } catch (error) {
     throw wrapUploadError(error);
   }
@@ -321,18 +418,49 @@ export async function generateJSONWithVideo(
 // A file lives in ONE key's Files store, so the upload and the analysis must run on the
 // same client. Rotating the key therefore means re-uploading, which is why the pair is
 // wrapped together here rather than rotated independently.
+//
+// onStage(stage, info) fires exactly once per attempt with stage "attempt" before the
+//   upload starts, and once with stage "analyzing" after the file is ACTIVE. info is
+//   { attempt, maxAttempts, key: "key N/M", model, reusedUpload, previous }, where
+//   reusedUpload says this key already holds the file (no upload needed) and previous
+//   describes the key that just failed ({ key, shape }), undefined on the first attempt.
+//   One "attempt" event per attempt is what lets a caller log one line per attempt.
+// options.maxAttempts caps the TOTAL attempts across the primary and fallback passes.
+//   Default: up to MAX_KEYS_PER_REQUEST per model, the pre-existing behaviour.
+// options.preferKeyIndex asks for a specific key first (see withKeyRotation).
 export async function analyzeVideo(
   filePath,
   systemPrompt,
   schemaHint,
   userPayload = "Analyze the uploaded video and return the requested JSON.",
   onStage = () => {},
+  options = {},
 ) {
   const stage = typeof onStage === "function" ? onStage : () => {};
-  const attemptWith = async (client, model) => {
-    stage("uploading");
-    const file = await uploadWithClient(client, filePath);
-    stage("analyzing");
+  const keys = pool();
+  const perPass = Math.min(keys.length, MAX_KEYS_PER_REQUEST);
+  const max =
+    Number.isInteger(options.maxAttempts) && options.maxAttempts > 0
+      ? options.maxAttempts
+      : perPass * 2;
+  const budget = { used: 0, max };
+  let previous;
+  const onRotate = (index, shape) => {
+    previous = { key: keyLabel(index), shape };
+  };
+  const attemptWith = async (client, index, info, model) => {
+    const base = {
+      attempt: info.attempt,
+      maxAttempts: info.maxAttempts,
+      key: keyLabel(index),
+      model,
+      reusedUpload: uploadCache.has(await uploadCacheKey(index, filePath)),
+      previous,
+    };
+    previous = undefined;
+    stage("attempt", base);
+    const file = await uploadWithClient(client, filePath, index);
+    stage("analyzing", { ...base, reusedUpload: Boolean(file.reused) });
     const response = await client.models.generateContent({
       model,
       contents: videoContents(userPayload, file),
@@ -340,16 +468,63 @@ export async function analyzeVideo(
     });
     return parseJSON(response.text);
   };
+  const rotation = {
+    budget,
+    onRotate,
+    preferKeyIndex: options.preferKeyIndex,
+  };
   try {
-    return await withKeyRotation((client) => attemptWith(client, PRIMARY_MODEL));
+    return await withKeyRotation(
+      (client, index, info) => attemptWith(client, index, info, PRIMARY_MODEL),
+      rotation,
+    );
   } catch (firstError) {
     if (!isKeyError(firstError)) throw cleanError(firstError);
+    if (firstError.attemptsExhausted) throw exhaustedError(firstError, budget);
     try {
-      return await withKeyRotation((client) => attemptWith(client, FALLBACK_MODEL));
+      return await withKeyRotation(
+        (client, index, info) => attemptWith(client, index, info, FALLBACK_MODEL),
+        rotation,
+      );
     } catch (secondError) {
+      if (secondError?.attemptsExhausted) throw exhaustedError(secondError, budget);
       throw cleanError(secondError);
     }
   }
+}
+
+function exhaustedError(source, budget) {
+  const error = cleanError(source);
+  error.attemptsExhausted = true;
+  error.attempts = budget.used;
+  error.lastShape = cooldownShape(source);
+  return error;
+}
+
+// Uploads a video under ONE key ahead of its analysis so the analysis can reuse it via
+// the cache. Returns the key position used, or undefined when nothing could be uploaded;
+// never throws for a key error, because the analysis path will upload again anyway.
+export async function preuploadVideo(filePath, keyIndex) {
+  const keys = pool();
+  let index = keyIndex;
+  if (!Number.isInteger(index) || index < 0 || index >= keys.length) {
+    index = nextKeyIndex(new Set());
+  }
+  if (index === undefined) return undefined;
+  try {
+    await uploadWithClient(clientForIndex(index), filePath, index);
+    return index;
+  } catch (error) {
+    if (!isKeyError(error)) throw wrapUploadError(error);
+    markCooling(index, error);
+    return undefined;
+  }
+}
+
+// Picks the key the selector should upload a batch on: the next round-robin key that is
+// not cooling. Position only; the value never leaves this module.
+export function pickKeyIndex() {
+  return nextKeyIndex(new Set());
 }
 
 export function getGeminiModels() {
@@ -362,6 +537,47 @@ export function getGeminiKeyPoolSize() {
   } catch {
     return 0;
   }
+}
+
+// Shape of the pool for the health route. Counts and positions only, never a value.
+export function getGeminiKeyPoolStatus() {
+  let size = 0;
+  try {
+    size = pool().length;
+  } catch {
+    size = 0;
+  }
+  const now = Date.now();
+  let cooling = 0;
+  let benched = 0;
+  for (const [, until] of cooldownUntil) {
+    if (until <= now) continue;
+    if (until - now > RATE_COOLDOWN_MS) benched += 1;
+    else cooling += 1;
+  }
+  const source = process.env.GEMINI_API_KEYS
+    ? "GEMINI_API_KEYS"
+    : process.env.GEMINI_API_KEY
+      ? "GEMINI_API_KEY"
+      : "none";
+  return {
+    size,
+    available: Math.max(0, size - cooling - benched),
+    cooling,
+    benched,
+    source,
+    cachedUploads: uploadCache.size,
+  };
+}
+
+// The last live probe without firing a new one, so a health poll during judging never
+// spends model quota by itself.
+export function getGeminiHealthCached() {
+  if (!healthCache.checkedAt) return { status: "unprobed", ageSec: null };
+  return {
+    status: healthCache.status,
+    ageSec: Math.round((Date.now() - healthCache.checkedAt) / 1000),
+  };
 }
 
 export async function getGeminiHealth() {
