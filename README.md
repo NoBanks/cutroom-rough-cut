@@ -46,7 +46,9 @@ craft rules are editable without touching code.
 3. SELECTOR uploads each clip through the Gemini Files API and returns timecoded moments.
    Retries use exponential backoff from 5s to a 90s cap with per-clip resume, because
    model-side 503 waves last minutes. A Files API upload is bound to the key that made it,
-   so upload and analysis share one key per clip.
+   so upload and analysis share one key per clip. Clips are pre-uploaded three at a time
+   on one key while the analysis itself stays strictly sequential, and an upload is cached
+   per key so a key the crew rotates back to is never asked to take the same file twice.
 4. EDITOR proposes an EDL. **The server validates it**: moment ids must exist, in/out
    points must fall inside the source spans, durations are recomputed server-side. A
    failed EDL earns exactly one re-ask.
@@ -56,7 +58,8 @@ craft rules are editable without touching code.
 6. REVIEWER watches the rendered cut and returns either `ship` or `one_pass` with typed
    orders (trim / extend / swap / drop / reorder, signed delta, max 5). Orders are applied
    deterministically in code; invalid orders are logged as skipped. There is never a
-   second review pass.
+   second review pass. The review is capped at 20 key attempts (`CUTROOM_REVIEW_MAX_ATTEMPTS`);
+   if the cap is hit the log says so and the first cut stands as delivered.
 
 **Models:** `gemini-3.8-flash`, falling back to `gemini-3.5-flash-lite`, all through
 the `@google/genai` SDK. That SDK is the only AI dependency in the project. Both are
@@ -80,6 +83,11 @@ capped by this number; 720p phone footage renders on a 1280x720 canvas either wa
 slow deployment box can pin the ceiling lower. `CUTROOM_RENDER_TIMEOUT_MS` is the budget
 for one render (default 600000, ten minutes). Chunk 7 renders twice per session, an
 initial cut then an improved one, and each render gets its own full budget.
+
+**Cold check:** `GET /api/health` reports the model ids in use, the key pool size and how
+many keys are cooling or benched (counts only, never a value), ffmpeg and ffprobe presence,
+temp session usage and free disk. It fires no model call by itself; `?probe=1` runs one
+live probe, cached for 60 seconds.
 
 **System dependency:** ffmpeg / ffprobe must be declared for the deployment, not only
 present in dev. In this repo that is `packages = ["ffmpeg"]` under `[nix]` in `.replit`.
@@ -106,6 +114,81 @@ be run without uploading anything.
 session, `.mp4` and `.mov` only. A file that declares a non-video MIME type is rejected
 before it is written, and anything ffprobe cannot read is rejected before the crew starts.
 Temporary session directories older than 24 hours are swept hourly.
+
+---
+
+## Judging notes
+
+Everything in this section was measured on the public deployment or on the development
+Mac and is dated. Nothing here is a target; these are the numbers the app actually produced.
+
+### The sample journey, click by click
+
+1. Open https://cutroom-rough-cut.replit.app. No account, no cookie wall; a session cookie
+   is set on first contact.
+2. Press **Use sample footage**. Three phone clips (406x720, 24fps, about 19 seconds each)
+   are copied into the session and ffprobed; the inventory table fills in.
+3. Leave the default brief or type one line, for example
+   `A confident 30 second promo of an artist reviewing framed astronaut art prints in a studio`,
+   pick a preset, press **Send to the crew**.
+4. Watch the log. The four agents run in order: DIRECTOR (seconds), SELECTOR (the long one,
+   it uploads and watches every clip), EDITOR (seconds), ASSEMBLY (ffmpeg, per-shot lines),
+   REVIEWER (uploads the rendered cut and watches it back).
+5. When the player appears, play the cut. Download `roughcut.mp4`, `edl.json`, `edl.csv`.
+   If the reviewer ordered a pass, `roughcut_v1.mp4` (the pre-review cut) and `review.json`
+   are there too and the player shows v2.
+6. Optional cold check at any time: `GET /api/health`.
+
+### Expected timings on the free deployment (measured 2026-09-07)
+
+The deployment box is a fractional vCPU on Replit autoscale, roughly 30 to 80x slower than
+the development Mac for ffmpeg work. Two complete production sessions on the shipped build:
+
+| Stage | Session 95182422 (SHIP) | Session 342fa7df (ONE PASS, demo capture) |
+|---|---|---|
+| DIRECTOR | about 3 min | about 1 min |
+| SELECTOR, 3 sample clips | about 22 min, 8 moments | 23 moments |
+| EDITOR | seconds, 5 edits / 21.6s | seconds, 5 edits / 18.7s |
+| ASSEMBLY, per shot | 17.4 / 30.5 / 18.2 / 27.3 / 15.3s (109s total, 1280x720, 24fps) | two renders (v1 23.5s, v2 18.7s) |
+| REVIEWER | SHIP after 17 key rotations, about 14 min | one_pass, 2 orders applied |
+| Brief to first downloadable cut | about 39 min | 28.3 min |
+| Brief to final state | about 39 min | 54.4 min |
+
+For scale, the same code on an Apple M4 Pro runs the whole crew in about 5 to 8 minutes,
+with the selector taking most of it and ffmpeg at roughly 1.4 seconds per shot.
+
+What eats the time on the free box: the selector uploads each clip through the Files API
+and Gemini watches it (the per-clip lines in the log carry elapsed seconds), and every
+rate limited key costs a fresh upload on the next key. Before the pre-judging pass the
+reviewer alone logged 17 upload-and-watch pairs on session 95182422; those are now one
+line per attempt and an upload is reused whenever the crew lands back on a key that
+already holds the file.
+
+### What the retry and apology paths look like
+
+The crew never hands over a broken cut and never leaves the page blank. Each failure has
+its own sentence in the log panel and a Retry button that re-sends the same footage and
+brief.
+
+- Per-clip rate limit or 5xx during selection, before any apology:
+  `Gemini is busy, the crew is waiting it out... clip_1.mp4 attempt 2/8; retrying in 5s (ApiError/429) 48s`
+- Key rotation, one line per attempt (position only, never a key value):
+  `clip_2.mp4: key 7/43 was rate limited; uploading then analyzing (attempt 1, rotation 2, key 8/43) 61s`
+- Quota wall, every key in the pool exhausted:
+  `Sorry about this. The selector was mid-run when it stopped. Gemini turned the crew away at the door: the crew rotated through every API key in the pool and each one is out of quota for now. Nothing is wrong with your footage. Wait a few minutes and press Retry, or add fresh keys to GEMINI_API_KEYS and try again.`
+- Model-side outage (5xx that did not clear):
+  `Sorry about this. The selector was mid-run when it stopped. Gemini answered with a 503, which is a problem on the model's side, not with your footage. The crew waited it out and it did not clear. Press Retry to send the same footage and brief back in.`
+- Invalid keys (401/403):
+  `Sorry about this. The director was mid-run when it stopped. Gemini refused the API keys (403). Put at least one valid key in GEMINI_API_KEYS, then press Retry.`
+- Footage with nothing usable in it (every shot read as a dead shot): the editor is skipped
+  and the log says so; Retry with different footage or a different brief.
+- Render budget exceeded (ten minutes per render): `The render exceeded its 600s budget and
+  was stopped.` The EDL is still downloadable; Retry re-runs the crew.
+- Reviewer cap hit: `gave up after 20 attempts in 312s; the last key was rate limited. The
+  first cut stands as delivered and is still downloadable.` The cut, the EDL and the CSV
+  are all still there; only the verdict is missing.
+- Second render (after review orders) fails: the first cut stands as delivered and the log
+  says `the second render failed; the first cut stands as delivered`.
 
 ---
 
