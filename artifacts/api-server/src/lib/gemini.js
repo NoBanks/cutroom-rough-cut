@@ -15,6 +15,13 @@ const FILE_POLL_ATTEMPTS = 30;
 const MAX_KEYS_PER_REQUEST = 12;
 const RATE_COOLDOWN_MS = 60_000;
 const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// A 5xx is the MODEL saying it is busy ("This model is currently experiencing high
+// demand"), not the key. Measured 2026-09-09: twelve keys in a row answered 503 on the
+// primary and the fallback model answered on its first try. So a busy key is only rested
+// briefly, and after MAX_MODEL_BUSY consecutive 5xx answers in one pass the request moves
+// to the fallback model instead of paying twelve uploads to learn the same thing.
+const BUSY_COOLDOWN_MS = 15_000;
+const MAX_MODEL_BUSY = 3;
 // Files API objects auto-delete 48 hours after upload (official docs). A cached upload is
 // trusted for 40 hours and re-verified with files.get before every reuse, so a file that
 // vanished early costs one cheap GET and a fresh upload, never a failed analysis.
@@ -163,15 +170,18 @@ function isKeyError(error) {
   return isTransientError(error) || isRejectedKey(error);
 }
 
+function isModelBusy(error) {
+  const status = errorStatus(error);
+  return status >= 500 && status <= 599;
+}
+
 function markCooling(index, error) {
-  let shape = "rate limited";
+  let shape = cooldownShape(error);
   let ms = RATE_COOLDOWN_MS;
-  if (isRejectedKey(error)) {
-    shape = "rejected";
+  if (isRejectedKey(error) || isDailyQuota(error)) {
     ms = DAILY_COOLDOWN_MS;
-  } else if (isDailyQuota(error)) {
-    shape = "daily quota";
-    ms = DAILY_COOLDOWN_MS;
+  } else if (isModelBusy(error)) {
+    ms = BUSY_COOLDOWN_MS;
   }
   cooldownUntil.set(index, Date.now() + ms);
   const why = quotaHint(error);
@@ -206,6 +216,7 @@ function cleanError(source) {
 function cooldownShape(error) {
   if (isRejectedKey(error)) return "rejected";
   if (isDailyQuota(error)) return "daily quota";
+  if (isModelBusy(error)) return `busy (${errorStatus(error)})`;
   return "rate limited";
 }
 
@@ -223,6 +234,7 @@ async function withKeyRotation(attempt, options = {}) {
   const budget = options.budget;
   const skip = new Set();
   let lastError;
+  let busyInARow = 0;
   let preferred =
     Number.isInteger(options.preferKeyIndex) &&
     options.preferKeyIndex >= 0 &&
@@ -258,6 +270,13 @@ async function withKeyRotation(attempt, options = {}) {
         options.onRotate(index, cooldownShape(error));
       }
       markCooling(index, error);
+      busyInARow = isModelBusy(error) ? busyInARow + 1 : 0;
+      if (busyInARow >= MAX_MODEL_BUSY) {
+        // The model, not the pool, is the problem. Hand the request to the caller so
+        // it can try the fallback model; the keys are still fine.
+        error.modelBusy = true;
+        break;
+      }
     }
   }
   if (lastError && budget && budget.used >= budget.max) {

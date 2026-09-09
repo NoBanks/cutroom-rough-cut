@@ -174,6 +174,10 @@ brief.
   `Gemini is busy, the crew is waiting it out... clip_1.mp4 attempt 2/8; retrying in 5s (ApiError/429) 48s`
 - Key rotation, one line per attempt (position only, never a key value):
   `clip_2.mp4: key 7/43 was rate limited; uploading then analyzing (attempt 1, rotation 2, key 8/43) 61s`
+- Model-side congestion is told apart from a key's quota. A 5xx reads `key 7/43 was busy (503)`;
+  after three busy answers in a row the crew moves to the fallback model instead of walking
+  the whole pool, because the model is the problem, not the keys. A 429 reads `rate limited`
+  and rests that key for a minute; a per-day ceiling benches it for the day.
 - Quota wall, every key in the pool exhausted:
   `Sorry about this. The selector was mid-run when it stopped. Gemini turned the crew away at the door: the crew rotated through every API key in the pool and each one is out of quota for now. Nothing is wrong with your footage. Wait a few minutes and press Retry, or add fresh keys to GEMINI_API_KEYS and try again.`
 - Model-side outage (5xx that did not clear):
