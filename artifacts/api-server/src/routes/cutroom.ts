@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { generateJSON } from "../lib/gemini.js";
+import { workspaceRoot, TEMP_DIR, SAMPLE_DIR } from "../lib/paths";
 
 const router = Router();
 const MAX_FILES = 10;
@@ -33,14 +34,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "application/mp4",
 ]);
 const SESSION_COOKIE = "cutroom_session";
-const currentDirectory = process.cwd();
-const workspaceRoot =
-  path.basename(currentDirectory) === "api-server" &&
-  path.basename(path.dirname(currentDirectory)) === "artifacts"
-    ? path.resolve(currentDirectory, "../..")
-    : currentDirectory;
-const TEMP_DIR = path.join(workspaceRoot, "artifacts/api-server/tmp-sessions");
-const SAMPLE_DIR = path.join(workspaceRoot, "sample_clips");
 const ALLOWED_EXTENSIONS = new Set([".mp4", ".mov"]);
 
 type ClipSource = "upload" | "sample";
@@ -704,6 +697,7 @@ async function startSelector(
           attempt: number;
           message: string;
           moments?: number;
+          silent?: boolean;
         }) => void;
       }): Promise<SelectorResult>;
     };
@@ -724,7 +718,9 @@ async function startSelector(
             clip.moments = progress.moments;
           }
         }
-        selectorLog(session, progress.message);
+        // A silent progress event updates the per-clip state (badge, attempt) without
+        // adding a log line, so the log stays one line per key attempt.
+        if (!progress.silent) selectorLog(session, progress.message);
       },
     });
     session.selects = result;

@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { analyzeVideo } from "../artifacts/api-server/src/lib/gemini.js";
+import {
+  analyzeVideo,
+  pickKeyIndex,
+  preuploadVideo,
+} from "../artifacts/api-server/src/lib/gemini.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_ANALYSIS_SECONDS = 5 * 60;
@@ -10,6 +14,16 @@ const MIN_MOMENT_SECONDS = 0.6;
 const MAX_ATTEMPTS = 8;
 const INITIAL_BACKOFF_MS = 5_000;
 const MAX_BACKOFF_MS = 90_000;
+// PRE-JUDGING PASS 2026-09-09: clips are pre-uploaded in parallel on ONE key while the
+// analysis stays strictly sequential, so the upload of clip 2 overlaps the analysis of
+// clip 1. A Files API upload is bound to the key that made it, so the analysis is asked
+// to start on that same key and finds the file already there. If that key is rate
+// limited the analysis rotates and re-uploads exactly as before; the worst case is the
+// old behaviour. Set CUTROOM_SELECTOR_PARALLEL_UPLOADS=0 to go back to strictly
+// sequential upload-then-analyze.
+const PARALLEL_UPLOADS =
+  process.env.CUTROOM_SELECTOR_PARALLEL_UPLOADS !== "0";
+const UPLOAD_CONCURRENCY = 3;
 const SHOT_SIZE_ENUM = ["XCU", "CU", "MCU", "MS", "WS", "XWS"];
 const SHOT_SIZE_ALIASES = {
   "EXTREME CLOSE UP": "XCU",
@@ -112,6 +126,29 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function seconds(sinceMs) {
+  return `${Math.round((Date.now() - sinceMs) / 1000)}s`;
+}
+
+// Runs tasks with at most `limit` in flight; results keep their input order.
+async function mapWithLimit(items, limit, task) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await task(items[index], index);
+    }
+  }
+  const workers = [];
+  for (let count = 0; count < Math.min(limit, items.length); count += 1) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
 async function readSelectorPrompt() {
   return (await fs.readFile(PROMPT_PATH, "utf8")).trim();
 }
@@ -199,16 +236,23 @@ function normaliseResult(result, duration) {
   };
 }
 
-async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) {
+async function analyseClip({
+  clip,
+  inventory,
+  sessionDir,
+  intent,
+  onProgress,
+  prepared: preparedFile,
+  preferKeyIndex,
+}) {
   let lastError;
+  const startedAt = Date.now();
+  const name = inventory.filename;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      onProgress({ state: "uploading", attempt, message: `uploading ${inventory.filename}` });
-      const prepared = await prepareAnalysisFile(
-        clip,
-        Number(inventory.duration_seconds),
-        sessionDir,
-      );
+      const prepared =
+        preparedFile ||
+        (await prepareAnalysisFile(clip, Number(inventory.duration_seconds), sessionDir));
       const prompt = await readSelectorPrompt();
       const userPayload = [
         "SELECTOR TASK",
@@ -222,17 +266,40 @@ async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) 
       ].join("\n");
       // analyzeVideo keeps the upload and the analysis on one key and re-uploads on the
       // next key when a key is rate limited, so a single key's quota cannot stall the crew.
+      // One log line per key attempt, with the elapsed time for this clip; the analyzing
+      // state update is silent so the log stays one line per attempt.
       const result = await analyzeVideo(
         prepared.filePath,
         prompt,
         SELECTOR_OUTPUT_SCHEMA,
         userPayload,
-        (stage) =>
+        (stage, info) => {
+          if (stage === "analyzing") {
+            onProgress({
+              state: "analyzing",
+              attempt,
+              silent: true,
+              message: `analyzing ${name}`,
+            });
+            return;
+          }
+          const where =
+            info.attempt > 1
+              ? `attempt ${attempt}, rotation ${info.attempt}, ${info.key}`
+              : `attempt ${attempt}, ${info.key}`;
+          const before = info.previous
+            ? `${info.previous.key} was ${info.previous.shape}; `
+            : "";
+          const action = info.reusedUpload
+            ? `already uploaded, analyzing`
+            : `uploading then analyzing`;
           onProgress({
-            state: stage,
+            state: info.reusedUpload ? "analyzing" : "uploading",
             attempt,
-            message: `${stage} ${inventory.filename}`,
-          }),
+            message: `${name}: ${before}${action} (${where}) ${seconds(startedAt)}`,
+          });
+        },
+        { preferKeyIndex },
       );
       const normalized = normaliseResult(result, prepared.analysisDuration);
       if (inventory.duration_seconds > MAX_ANALYSIS_SECONDS) {
@@ -241,7 +308,7 @@ async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) 
       onProgress({
         state: "complete",
         attempt,
-        message: `selected ${normalized.moments.length} moments from ${inventory.filename}`,
+        message: `${name}: selected ${normalized.moments.length} moments in ${seconds(startedAt)}`,
         moments: normalized.moments.length,
       });
       return normalized;
@@ -255,7 +322,7 @@ async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) 
       onProgress({
         state: "retrying",
         attempt,
-        message: `Gemini is busy, the crew is waiting it out... ${inventory.filename} attempt ${attempt + 1}/${MAX_ATTEMPTS}; retrying in ${Math.round(backoff / 1000)}s (${failureLabel(error)})`,
+        message: `Gemini is busy, the crew is waiting it out... ${name} attempt ${attempt + 1}/${MAX_ATTEMPTS}; retrying in ${Math.round(backoff / 1000)}s (${failureLabel(error)}) ${seconds(startedAt)}`,
       });
       await sleep(backoff);
     }
@@ -263,7 +330,7 @@ async function analyseClip({ clip, inventory, sessionDir, intent, onProgress }) 
   onProgress({
     state: "error",
     attempt: MAX_ATTEMPTS,
-    message: `${inventory.filename} failed after ${MAX_ATTEMPTS} attempts (${failureLabel(lastError)}).`,
+    message: `${name} failed after ${MAX_ATTEMPTS} attempts in ${seconds(startedAt)} (${failureLabel(lastError)}).`,
   });
   return {
     moments: [],
@@ -282,7 +349,9 @@ export async function runSelector({
   const clipsResult = [];
   const moments = [];
   const errors = [];
+  const startedAt = Date.now();
 
+  const jobs = [];
   for (const clipInventory of inventory) {
     const clip = clips.find(
       (item) =>
@@ -291,11 +360,89 @@ export async function runSelector({
         item.filename === clipInventory.filename,
     );
     if (!clip) continue;
+    jobs.push({ clip, inventory: clipInventory });
+  }
+
+  // Trim long clips to their first five minutes up front (stream copy, cheap) so the
+  // pre-upload pass pushes the file the model will actually watch.
+  for (const job of jobs) {
+    try {
+      job.prepared = await prepareAnalysisFile(
+        job.clip,
+        Number(job.inventory.duration_seconds),
+        sessionDir,
+      );
+    } catch {
+      job.prepared = undefined;
+    }
+  }
+
+  let uploads = jobs.map(() => Promise.resolve(undefined));
+  if (PARALLEL_UPLOADS && jobs.length > 1) {
+    const keyIndex = pickKeyIndex();
+    if (keyIndex !== undefined) {
+      const keyText = `key ${keyIndex + 1}`;
+      onProgress({
+        state: "uploading",
+        attempt: 0,
+        message: `pre-uploading ${jobs.length} clips on ${keyText}, ${UPLOAD_CONCURRENCY} at a time; analysis stays sequential`,
+      });
+      const uploadOne = async (job) => {
+        if (!job.prepared) return undefined;
+        const uploadStart = Date.now();
+        try {
+          const used = await preuploadVideo(job.prepared.filePath, keyIndex);
+          onProgress({
+            clipId: job.inventory.clip_id,
+            state: "queued",
+            attempt: 0,
+            message:
+              used === undefined
+                ? `${job.inventory.filename}: pre-upload did not land on ${keyText} (it is cooling); the analysis will upload it`
+                : `${job.inventory.filename}: pre-uploaded on ${keyText} in ${seconds(uploadStart)}`,
+          });
+          return used;
+        } catch (error) {
+          onProgress({
+            clipId: job.inventory.clip_id,
+            state: "queued",
+            attempt: 0,
+            message: `${job.inventory.filename}: pre-upload failed (${failureLabel(error)}); the analysis will upload it`,
+          });
+          return undefined;
+        }
+      };
+      // Kick every upload off now (bounded concurrency) and hand each clip its own
+      // promise, so clip 1 starts analyzing the moment its own upload is ACTIVE while
+      // clips 2 and 3 are still going up.
+      const settled = jobs.map(() => {
+        let resolve;
+        const promise = new Promise((done) => {
+          resolve = done;
+        });
+        return { promise, resolve };
+      });
+      mapWithLimit(jobs, UPLOAD_CONCURRENCY, async (job, index) => {
+        const used = await uploadOne(job);
+        settled[index].resolve(used);
+        return used;
+      }).catch(() => {
+        settled.forEach((entry) => entry.resolve(undefined));
+      });
+      uploads = settled.map((entry) => entry.promise);
+    }
+  }
+
+  for (let index = 0; index < jobs.length; index += 1) {
+    const { clip, inventory: clipInventory, prepared } = jobs[index];
+    const preferKeyIndex = await uploads[index];
     const result = await analyseClip({
       clip,
       inventory: clipInventory,
       sessionDir,
       intent,
+      prepared,
+      preferKeyIndex,
       onProgress: (progress) =>
         onProgress({ ...progress, clipId: clipInventory.clip_id }),
     });
@@ -312,6 +459,12 @@ export async function runSelector({
     if (result.error) errors.push(`${clipInventory.filename}: ${result.error}`);
     clipsResult.push(clipResult);
     moments.push(...clipResult.moments);
+    onProgress({
+      state: result.error ? "error" : "complete",
+      attempt: 0,
+      silent: true,
+      message: `${index + 1}/${jobs.length} clips done, ${seconds(startedAt)} elapsed`,
+    });
   }
 
   return {
