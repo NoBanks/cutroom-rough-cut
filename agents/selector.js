@@ -391,17 +391,16 @@ export async function runSelector({
         if (!job.prepared) return undefined;
         const uploadStart = Date.now();
         try {
-          const used = await preuploadVideo(job.prepared.filePath, keyIndex);
+          const outcome = await preuploadVideo(job.prepared.filePath, keyIndex);
           onProgress({
             clipId: job.inventory.clip_id,
             state: "queued",
             attempt: 0,
-            message:
-              used === undefined
-                ? `${job.inventory.filename}: pre-upload did not land on ${keyText} (it is cooling); the analysis will upload it`
-                : `${job.inventory.filename}: pre-uploaded on ${keyText} in ${seconds(uploadStart)}`,
+            message: outcome.ok
+              ? `${job.inventory.filename}: pre-uploaded on ${keyText} in ${seconds(uploadStart)}`
+              : `${job.inventory.filename}: pre-upload on ${keyText} was ${outcome.shape}; the analysis will upload it on the next key`,
           });
-          return used;
+          return outcome.ok ? outcome.index : undefined;
         } catch (error) {
           onProgress({
             clipId: job.inventory.clip_id,

@@ -174,7 +174,23 @@ function markCooling(index, error) {
     ms = DAILY_COOLDOWN_MS;
   }
   cooldownUntil.set(index, Date.now() + ms);
-  console.warn(`[gemini] ${keyLabel(index)} ${shape}, rotating to the next key.`);
+  const why = quotaHint(error);
+  console.warn(
+    `[gemini] ${keyLabel(index)} ${shape}${why ? ` (${why})` : ""}, rotating to the next key.`,
+  );
+}
+
+// The quota id and retry delay Google puts in a 429 body, e.g.
+// "GenerateRequestsPerDayPerProjectPerModel-FreeTier" and "34s". Neither contains a key
+// value; both say WHICH ceiling was hit, which is the one thing the position label
+// cannot. Only these two fields are ever taken from the error text.
+function quotaHint(error) {
+  const text = errorText(error);
+  const quota = text.match(/quotaId\\?":\\?"([A-Za-z0-9_.-]+)/);
+  const delay = text.match(/retryDelay\\?":\\?"([0-9.]+s)/);
+  return [quota ? quota[1] : "", delay ? `retry ${delay[1]}` : ""]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function cleanError(source) {
@@ -502,22 +518,24 @@ function exhaustedError(source, budget) {
 }
 
 // Uploads a video under ONE key ahead of its analysis so the analysis can reuse it via
-// the cache. Returns the key position used, or undefined when nothing could be uploaded;
-// never throws for a key error, because the analysis path will upload again anyway.
+// the cache. Returns { index, ok, shape }: ok false with the shape of the failure when the
+// key was rate limited or rejected; never throws for a key error, because the analysis
+// path will upload again anyway.
 export async function preuploadVideo(filePath, keyIndex) {
   const keys = pool();
   let index = keyIndex;
   if (!Number.isInteger(index) || index < 0 || index >= keys.length) {
     index = nextKeyIndex(new Set());
   }
-  if (index === undefined) return undefined;
+  if (index === undefined) return { index: undefined, ok: false, shape: "no key free" };
   try {
-    await uploadWithClient(clientForIndex(index), filePath, index);
-    return index;
+    const file = await uploadWithClient(clientForIndex(index), filePath, index);
+    return { index, ok: true, reused: Boolean(file.reused) };
   } catch (error) {
     if (!isKeyError(error)) throw wrapUploadError(error);
+    const shape = cooldownShape(error);
     markCooling(index, error);
-    return undefined;
+    return { index, ok: false, shape };
   }
 }
 

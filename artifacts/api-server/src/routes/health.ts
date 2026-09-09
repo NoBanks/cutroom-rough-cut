@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { Router, type IRouter } from "express";
 import {
@@ -9,7 +10,29 @@ import {
   getGeminiKeyPoolStatus,
   getGeminiModels,
 } from "../lib/gemini.js";
-import { TEMP_DIR } from "../lib/paths";
+import { TEMP_DIR, workspaceRoot } from "../lib/paths";
+
+type GeminiModule = typeof import("../lib/gemini.js");
+
+// The agents (director, selector, editor, reviewer) import lib/gemini.js from SOURCE at
+// runtime, while this bundled server holds its own copy of the module. Key cooldowns and
+// the upload cache live in the agents' instance, so the health route reads the pool from
+// there; the bundled copy only serves the crew warm-up line and /healthz.
+async function agentGemini(): Promise<GeminiModule> {
+  try {
+    const url = pathToFileURL(
+      path.join(workspaceRoot, "artifacts/api-server/src/lib/gemini.js"),
+    ).href;
+    return (await import(url)) as GeminiModule;
+  } catch {
+    return {
+      getGeminiHealth,
+      getGeminiHealthCached,
+      getGeminiKeyPoolStatus,
+      getGeminiModels,
+    } as GeminiModule;
+  }
+}
 
 const execFileAsync = promisify(execFile);
 const router: IRouter = Router();
@@ -110,11 +133,15 @@ router.get("/healthz", async (_req, res) => {
 // add ?probe=1 to run one live probe (cached 60s).
 router.get("/health", async (req, res) => {
   const probe = req.query.probe === "1" || req.query.probe === "true";
-  const [toolStatus, temp] = await Promise.all([tools(), tempUsage()]);
+  const [toolStatus, temp, agents] = await Promise.all([
+    tools(),
+    tempUsage(),
+    agentGemini(),
+  ]);
   const gemini = probe
-    ? { status: await getGeminiHealth(), ageSec: 0 }
-    : getGeminiHealthCached();
-  const keyPool = getGeminiKeyPoolStatus();
+    ? { status: await agents.getGeminiHealth(), ageSec: 0 }
+    : agents.getGeminiHealthCached();
+  const keyPool = agents.getGeminiKeyPoolStatus();
   const problems: string[] = [];
   if (keyPool.size === 0) problems.push("no Gemini key in GEMINI_API_KEYS");
   if (!toolStatus.ffmpeg.present) problems.push("ffmpeg missing");
@@ -127,7 +154,7 @@ router.get("/health", async (req, res) => {
     checkedAt: new Date().toISOString(),
     uptimeSec: Math.round((Date.now() - startedAt) / 1000),
     node: process.version,
-    models: getGeminiModels(),
+    models: agents.getGeminiModels(),
     keyPool,
     gemini,
     ffmpeg: toolStatus.ffmpeg,

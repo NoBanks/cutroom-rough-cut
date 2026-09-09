@@ -51,7 +51,7 @@ export function analyzeVideo(
 export function preuploadVideo(
   filePath: string,
   keyIndex?: number,
-): Promise<number | undefined>;
+): Promise<{ index: number | undefined; ok: boolean; shape?: string; reused?: boolean }>;
 
 export function pickKeyIndex(): number | undefined;
 
