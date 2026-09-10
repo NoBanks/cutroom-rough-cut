@@ -171,6 +171,36 @@ interface ReviewerResult {
   reviewers_note: string;
 }
 
+interface CoverageGap {
+  gap_index: number;
+  gap_type: string;
+  severity: string;
+  what_is_missing: string;
+  why_the_cut_needs_it: string;
+  evidence: string;
+}
+
+interface CoveragePickup {
+  priority: number;
+  serves_gap: number | null;
+  shot_size: string;
+  shot: string;
+  movement: string;
+  duration_sec: number;
+  camera_note: string;
+}
+
+interface CoverageResult {
+  generated_at: string;
+  coverage_summary: string;
+  gaps: CoverageGap[];
+  pickups: CoveragePickup[];
+  next_shoot_note: string;
+  skipped: string[];
+  total_roll_sec: number;
+  census: Record<string, unknown>;
+}
+
 interface SessionState {
   id: string;
   dir: string;
@@ -209,6 +239,11 @@ interface SessionState {
   reviewerResult?: ReviewerResult;
   reviewerError?: string;
   reviewAttempted: boolean;
+  coverageStatus: "idle" | "running" | "complete" | "error";
+  coverageLog: string[];
+  coverageResult?: CoverageResult;
+  coverageError?: string;
+  coverageAttempted: boolean;
   appliedOrders: AppliedOrder[];
   skippedOrders: string[];
   cutVersion: number;
@@ -258,6 +293,9 @@ function createSession(): SessionState {
     assemblyLog: [],
     reviewerStatus: "idle",
     reviewerLog: [],
+    coverageStatus: "idle",
+    coverageLog: [],
+    coverageAttempted: false,
     reviewAttempted: false,
     appliedOrders: [],
     skippedOrders: [],
@@ -347,6 +385,10 @@ function serializeSession(session: SessionState) {
     reviewerLog: session.reviewerLog,
     reviewerResult: session.reviewerResult,
     reviewerError: session.reviewerError,
+    coverageStatus: session.coverageStatus,
+    coverageLog: session.coverageLog,
+    coverageResult: session.coverageResult,
+    coverageError: session.coverageError,
     appliedOrders: session.appliedOrders,
     skippedOrders: session.skippedOrders,
     cutVersion: session.cutVersion,
@@ -581,6 +623,8 @@ async function clearGeneratedFiles(session: SessionState) {
       "roughcut.mp4",
       "roughcut_v1.mp4",
       "review.json",
+      "coverage.json",
+      "pickups.txt",
     ].map(
       (file) => fs.rm(path.join(session.dir, file), { force: true }),
     ),
@@ -623,6 +667,11 @@ function resetCreativeState(session: SessionState) {
   session.reviewerResult = undefined;
   session.reviewerError = undefined;
   session.reviewAttempted = false;
+  session.coverageStatus = "idle";
+  session.coverageLog = [];
+  session.coverageResult = undefined;
+  session.coverageError = undefined;
+  session.coverageAttempted = false;
   session.appliedOrders = [];
   session.skippedOrders = [];
   session.cutVersion = 1;
@@ -655,6 +704,15 @@ function assemblyLog(session: SessionState, message: string) {
 function reviewerLog(session: SessionState, message: string) {
   session.reviewerLog.push(`[REVIEWER] ${message}`);
   if (session.reviewerLog.length > 40) session.reviewerLog.shift();
+}
+
+function coverageLog(session: SessionState, message: string) {
+  session.coverageLog.push(`[COVERAGE] ${message}`);
+  if (session.coverageLog.length > 40) session.coverageLog.shift();
+}
+
+function coverageModulePath() {
+  return pathToFileURL(path.join(workspaceRoot, "agents/coverage.js")).href;
 }
 
 function reviewerModulePath() {
@@ -818,6 +876,10 @@ async function startAssembly(session: SessionState) {
     session.status = "completed";
     if (!session.reviewAttempted) {
       await startReviewer(session);
+      // The fifth chair runs once the review is settled, whatever its outcome. It
+      // never blocks the cut: status is already "completed" and the downloads are
+      // live before the coverage call starts.
+      await startCoverage(session);
     }
   } catch (error) {
     session.assemblyStatus = "error";
@@ -835,6 +897,86 @@ async function startAssembly(session: SessionState) {
     console.error("CUTROOM assembly failed", error);
   }
   return { started: true, busy: false } as const;
+}
+
+async function writeCoverage(session: SessionState) {
+  if (!session.coverageResult) return;
+  const coverage = (await import(coverageModulePath())) as {
+    renderPickupSheet(
+      coverage: CoverageResult,
+      options: { brief: string; sessionId: string },
+    ): string;
+  };
+  await fs.writeFile(
+    path.join(session.dir, "coverage.json"),
+    JSON.stringify(session.coverageResult, null, 2),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(session.dir, "pickups.txt"),
+    coverage.renderPickupSheet(session.coverageResult, {
+      brief: session.brief,
+      sessionId: session.id,
+    }),
+    "utf8",
+  );
+}
+
+// COVERAGE runs exactly once per session, after the review. It reads the evidence the
+// other four agents wrote (intent, moments, EDL, verdict) and never the footage, so it
+// is a single text call. A failure here leaves the cut untouched; the log says so.
+async function startCoverage(session: SessionState) {
+  if (session.coverageAttempted || session.coverageStatus === "running") return;
+  if (!session.editorResult || !session.directorIntent) return;
+  session.coverageAttempted = true;
+  session.coverageStatus = "running";
+  session.coverageError = undefined;
+  coverageLog(session, "coverage started; reading the census for tomorrow's pickups");
+  try {
+    const coverage = (await import(coverageModulePath())) as {
+      runCoverage(args: {
+        intent: Record<string, unknown>;
+        inventory: InventoryClip[];
+        moments: SelectorMoment[];
+        editorResult: EditorResult;
+        reviewerResult: ReviewerResult | null;
+        brief: string;
+        sessionId: string;
+        onLog: (message: string) => void;
+      }): Promise<{ coverage: CoverageResult }>;
+    };
+    const { coverage: result } = await coverage.runCoverage({
+      intent: session.directorIntent,
+      inventory: session.inventory,
+      moments: session.moments,
+      editorResult: session.editorResult,
+      reviewerResult: session.reviewerResult ?? null,
+      brief: session.brief,
+      sessionId: session.id,
+      onLog: (message) => coverageLog(session, message),
+    });
+    session.coverageResult = result;
+    result.skipped.forEach((message) => coverageLog(session, `skipped ${message}`));
+    coverageLog(
+      session,
+      result.gaps.length === 0
+        ? "no gaps; the footage covers the cut"
+        : `${result.gaps.length} ${result.gaps.length === 1 ? "gap" : "gaps"}, ${
+            result.pickups.length
+          } ${result.pickups.length === 1 ? "pickup" : "pickups"}, roll about ${Math.ceil(
+            result.total_roll_sec,
+          )}s`,
+    );
+    coverageLog(session, result.next_shoot_note);
+    await writeCoverage(session);
+    session.coverageStatus = "complete";
+  } catch (error) {
+    session.coverageStatus = "error";
+    session.coverageError =
+      "The coverage pass could not finish; the cut and the EDL stand as delivered.";
+    coverageLog(session, session.coverageError);
+    console.error("CUTROOM coverage failed", error);
+  }
 }
 
 async function writeReview(session: SessionState) {
@@ -1280,12 +1422,69 @@ async function sendEdlCsv(
   }
 }
 
+async function sendSessionFile(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+  filename: string,
+  type: string,
+  notReady: string,
+) {
+  try {
+    const session = sessionFromRoute(req, res);
+    const contents = await fs.readFile(path.join(session.dir, filename), "utf8");
+    return res
+      .type(type)
+      .set("Content-Disposition", `attachment; filename="${filename}"`)
+      .send(contents);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return errorResponse(res, 404, notReady);
+    }
+    return next(error);
+  }
+}
+
+function sendPickups(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+) {
+  return sendSessionFile(
+    req,
+    res,
+    next,
+    "pickups.txt",
+    "text/plain",
+    "The pickup list is not ready yet.",
+  );
+}
+
+function sendCoverageJson(
+  req: SessionRequest,
+  res: Response,
+  next: (error?: unknown) => void,
+) {
+  return sendSessionFile(
+    req,
+    res,
+    next,
+    "coverage.json",
+    "application/json",
+    "The coverage report is not ready yet.",
+  );
+}
+
 router.get("/session/roughcut.mp4", sendRoughCut);
 router.get("/session/roughcut_v1.mp4", sendRoughCutV1);
 router.get("/session/:sessionId/roughcut_v1.mp4", sendRoughCutV1);
 router.get("/session/:sessionId/roughcut.mp4", sendRoughCut);
 router.get("/session/:sessionId/edl.json", sendEdlJson);
 router.get("/session/:sessionId/edl.csv", sendEdlCsv);
+router.get("/session/pickups.txt", sendPickups);
+router.get("/session/coverage.json", sendCoverageJson);
+router.get("/session/:sessionId/pickups.txt", sendPickups);
+router.get("/session/:sessionId/coverage.json", sendCoverageJson);
 
 router.post("/session/render", async (req: SessionRequest, res, next) => {
   try {

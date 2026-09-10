@@ -15,9 +15,10 @@ Built for the Agentic Cinema hackathon, Replit track.
 
 Shooting is fast. Cutting is slow. So most footage dies unwatched in a folder.
 
-CUTROOM is a virtual cutting room staffed by four AI film agents. You hand it clips and a
+CUTROOM is a virtual cutting room staffed by five AI film agents. You hand it clips and a
 single line of intent. It hands back a 1080p/24fps rough cut, an EDL you can open in any
-NLE, and a live log of the crew's reasoning so you can see exactly why every cut exists.
+NLE, a live log of the crew's reasoning so you can see exactly why every cut exists, and
+a pickup list: the footage the cut is missing, written as a shot list for tomorrow.
 
 It does not replace an editor. It replaces the empty timeline.
 
@@ -31,6 +32,7 @@ It does not replace an editor. It replaces the empty timeline.
 | **SELECTOR** | Watches each clip, up to its first five minutes | video via the Gemini Files API | timecoded moments with shot size, motion, subject, strength score |
 | **EDITOR** | Cuts against the intent | moments + director intent | validated EDL with a "why" on every cut |
 | **REVIEWER** | Watches the assembled cut back | the rendered cut, as video | verdict plus at most one bounded pass of typed orders |
+| **COVERAGE** | Tells the shooter what is missing | the crew's own census: intent, moments, EDL, verdict (never the footage) | typed gaps with evidence, a prioritized pickup shot list, `pickups.txt` |
 
 Each agent's system prompt lives in `agents/prompts/` and is loaded at call time, so the
 craft rules are editable without touching code.
@@ -57,6 +59,18 @@ craft rules are editable without touching code.
    orders (trim / extend / swap / drop / reorder, signed delta, max 5). Orders are applied
    deterministically in code; invalid orders are logged as skipped. There is never a
    second review pass.
+7. COVERAGE runs once the review is settled. Code builds a census first (shot sizes found,
+   in the cut and benched; `look_for` items the selector never saw; dead shots; clips
+   without audio; runtime against target; the opening and closing shot; the reviewer's
+   findings), and the model reasons over that census only. It returns typed gaps
+   (`shot_size`, `motion`, `subject`, `audio`, `opening`, `closing`, `continuity`,
+   `b_roll`), each with a severity and the census line it cites, plus concrete pickups
+   that each serve exactly one gap, most important first. Unknown gap types, orphan
+   pickups and prose shot sizes are normalized or dropped in code and listed under
+   "left out by validation". Output is `coverage.json` (with the census attached so
+   every gap can be checked against the numbers) and `pickups.txt`, a plain-text call
+   sheet. The cut is already delivered before this stage starts; a coverage failure
+   never touches it.
 
 **Models:** `gemini-3.8-flash`, falling back to `gemini-3.5-flash-lite`, all through
 the `@google/genai` SDK. That SDK is the only AI dependency in the project. Both are
@@ -108,6 +122,18 @@ before it is written, and anything ffprobe cannot read is rejected before the cr
 Temporary session directories older than 24 hours are swept hourly.
 
 ---
+
+## Tests
+
+```
+cd artifacts/api-server && pnpm run test
+```
+
+The suite runs offline. The COVERAGE tests feed a real production session (2026-09-07,
+verdict SHIP, in `test/fixtures/`) through the census and a stubbed model, and prove the
+normalization: unknown gap types dropped, orphan pickups dropped, prose shot sizes mapped
+to the enum, roll times raised to three times the pacing band, an empty answer rejected,
+and a plain-text sheet with no markup.
 
 ## Notes from the build
 
