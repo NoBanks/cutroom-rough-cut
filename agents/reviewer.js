@@ -9,6 +9,21 @@ const PROMPT_PATH = path.join(
 );
 
 export const MAX_ORDERS = 5;
+// PRE-JUDGING PASS 2026-09-09: the review is capped so a quota wall cannot keep the
+// session in "reviewing" forever. The cap is TOTAL attempts across the primary and the
+// fallback model; each attempt is one key. Default 20 because the production run of
+// 2026-09-07 (session 95182422) needed 17 key rotations before a model answered. Override
+// with CUTROOM_REVIEW_MAX_ATTEMPTS. When the cap is hit the log says so and the first
+// cut stands as delivered; nothing is lost.
+const REVIEW_ATTEMPTS_FLOOR = 1;
+const REVIEW_ATTEMPTS_CEILING = 48;
+export const MAX_REVIEW_ATTEMPTS = Math.min(
+  REVIEW_ATTEMPTS_CEILING,
+  Math.max(
+    REVIEW_ATTEMPTS_FLOOR,
+    Number.parseInt(process.env.CUTROOM_REVIEW_MAX_ATTEMPTS || "", 10) || 20,
+  ),
+);
 const MIN_SHOT_SEC = 0.5;
 const MIN_ROWS_AFTER_REVIEW = 2;
 const MATCH_TOLERANCE = 0.25;
@@ -374,18 +389,43 @@ export async function runReviewer({
     JSON.stringify(REVIEWER_OUTPUT_SCHEMA),
   ].join("\n");
   // analyzeVideo keeps the upload and the analysis on one key and re-uploads on the next
-  // key when a key is rate limited, so a single key's quota cannot stall the review.
-  const result = await analyzeVideo(
-    roughCutPath,
-    prompt,
-    REVIEWER_OUTPUT_SCHEMA,
-    userPayload,
-    (stage) =>
+  // key when a key is rate limited, so a single key's quota cannot stall the review. A key
+  // that already holds the cut (cached upload) is not asked to take it again. One log line
+  // per attempt, carrying the attempt number, the key position and what the last key did.
+  const startedAt = Date.now();
+  const elapsed = () => `${Math.round((Date.now() - startedAt) / 1000)}s`;
+  let result;
+  let lastAttempt = 0;
+  try {
+    result = await analyzeVideo(
+      roughCutPath,
+      prompt,
+      REVIEWER_OUTPUT_SCHEMA,
+      userPayload,
+      (stage, info) => {
+        if (stage !== "attempt") return;
+        lastAttempt = info.attempt;
+        const count = `attempt ${info.attempt}/${info.maxAttempts}`;
+        const upload = info.reusedUpload
+          ? `${info.key} already holds the cut, watching it start to finish`
+          : `uploading the cut on ${info.key} and watching it start to finish`;
+        const before = info.previous
+          ? `${info.previous.key} was ${info.previous.shape}; `
+          : "";
+        log(`${count}: ${before}${upload} (${info.model}, ${elapsed()})`);
+      },
+      { maxAttempts: MAX_REVIEW_ATTEMPTS },
+    );
+  } catch (error) {
+    if (error?.attemptsExhausted) {
       log(
-        stage === "uploading"
-          ? "uploading the rough cut for review"
-          : "watching the cut start to finish",
-      ),
-  );
+        `gave up after ${error.attempts} attempts in ${elapsed()}; the last key was ${
+          error.lastShape || "rate limited"
+        }. The first cut stands as delivered and is still downloadable.`,
+      );
+    }
+    throw error;
+  }
+  log(`the reviewer answered on attempt ${lastAttempt} after ${elapsed()}`);
   return normalizeReviewerResult(result);
 }
