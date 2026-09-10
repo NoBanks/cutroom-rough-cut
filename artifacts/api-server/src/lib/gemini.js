@@ -26,6 +26,59 @@ const MAX_MODEL_BUSY = 3;
 // trusted for 40 hours and re-verified with files.get before every reuse, so a file that
 // vanished early costs one cheap GET and a fresh upload, never a failed analysis.
 const UPLOAD_CACHE_TTL_MS = 40 * 60 * 60 * 1000;
+// PER-CALL TIMEOUT 2026-09-09: one 503 hung a generateContent call for about 200s in the
+// pre-judging run because nothing bounded a single SDK call. Every generate, upload and
+// files.get now runs under a wall-clock budget. Two layers, on purpose:
+//   1. The SDK's own options (@google/genai 2.19.0, verified in dist/genai.d.ts):
+//      config.httpOptions.timeout (ms, per attempt, also sent as X-Server-Timeout) and
+//      config.abortSignal, so the socket is actually torn down.
+//   2. A local Promise.race against the same budget, because files.upload threads
+//      neither option into the chunk transfer (see uploadFileWithTimeout) and because a
+//      stub or a stuck socket that ignores the signal must still return on time.
+// A timeout is classified like a 5xx: the key rests BUSY_COOLDOWN_MS and the call rotates.
+const CALL_TIMEOUT_MS = positiveMs(process.env.CUTROOM_GEMINI_CALL_TIMEOUT_MS, 60_000);
+const UPLOAD_TIMEOUT_MS = positiveMs(process.env.CUTROOM_GEMINI_UPLOAD_TIMEOUT_MS, 120_000);
+
+function positiveMs(raw, fallback) {
+  const value = Number.parseInt(raw || "", 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function secondsLabel(ms) {
+  const seconds = ms / 1000;
+  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
+}
+
+function timeoutError(ms, what) {
+  const error = new Error(`Gemini ${what} timed out after ${secondsLabel(ms)}.`);
+  error.name = "GeminiTimeoutError";
+  error.timedOut = true;
+  error.timeoutMs = ms;
+  return error;
+}
+
+function isTimeout(error) {
+  return error?.timedOut === true;
+}
+
+// Runs run(signal, httpOptions) and settles within `ms` no matter what run does. On the
+// deadline the race rejects FIRST (so the caller sees the timeout, not the SDK's abort
+// error) and then the signal is aborted so the SDK drops the socket.
+async function withCallTimeout(ms, what, run) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(timeoutError(ms, what));
+      controller.abort();
+    }, ms);
+  });
+  try {
+    return await Promise.race([run(controller.signal, { timeout: ms }), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 let healthCache = { checkedAt: 0, status: "error" };
 let healthInFlight;
@@ -75,11 +128,21 @@ function pool() {
   return poolKeys;
 }
 
+const defaultClientFactory = (key) => new GoogleGenAI({ apiKey: key });
+let clientFactory = defaultClientFactory;
+
+// Test seam only: lets the offline timeout test hand in a stub client that never answers.
+// Production never calls this. Clears the client cache so the stub is used at once.
+export function _setClientFactoryForTests(factory) {
+  clientFactory = typeof factory === "function" ? factory : defaultClientFactory;
+  clients.clear();
+}
+
 function clientForIndex(index) {
   const key = poolKeys[index];
   let existing = clients.get(key);
   if (!existing) {
-    existing = new GoogleGenAI({ apiKey: key });
+    existing = clientFactory(key);
     clients.set(key, existing);
   }
   return existing;
@@ -141,6 +204,7 @@ function errorText(error) {
 }
 
 function isTransientError(error) {
+  if (isTimeout(error)) return true;
   const status = errorStatus(error);
   if (status === 429 || (status >= 500 && status <= 599)) return true;
   return /RESOURCE_EXHAUSTED|quota/i.test(errorText(error));
@@ -170,7 +234,10 @@ function isKeyError(error) {
   return isTransientError(error) || isRejectedKey(error);
 }
 
+// A timeout counts as busy: the model did not answer inside the budget, which is the
+// same signal as a 503, so it rests the key briefly and counts toward the fallback.
 function isModelBusy(error) {
+  if (isTimeout(error)) return true;
   const status = errorStatus(error);
   return status >= 500 && status <= 599;
 }
@@ -184,6 +251,13 @@ function markCooling(index, error) {
     ms = BUSY_COOLDOWN_MS;
   }
   cooldownUntil.set(index, Date.now() + ms);
+  if (isTimeout(error)) {
+    // One honest line: how long we waited and which position gave up. No key value.
+    console.warn(
+      `[gemini] timed out after ${secondsLabel(error.timeoutMs)} on ${keyLabel(index)}, rotating to the next key.`,
+    );
+    return;
+  }
   const why = quotaHint(error);
   console.warn(
     `[gemini] ${keyLabel(index)} ${shape}${why ? ` (${why})` : ""}, rotating to the next key.`,
@@ -214,6 +288,7 @@ function cleanError(source) {
 }
 
 function cooldownShape(error) {
+  if (isTimeout(error)) return `timed out after ${secondsLabel(error.timeoutMs)}`;
   if (isRejectedKey(error)) return "rejected";
   if (isDailyQuota(error)) return "daily quota";
   if (isModelBusy(error)) return `busy (${errorStatus(error)})`;
@@ -286,6 +361,35 @@ async function withKeyRotation(attempt, options = {}) {
   throw lastError || new Error("Gemini request failed.");
 }
 
+// The three SDK calls this module makes, each under its budget. The SDK options go in
+// `config` (GenerateContentConfig / UploadFileConfig / GetFileConfig all carry
+// httpOptions + abortSignal in 2.19.0); the race around them is the guarantee.
+function generateWithTimeout(client, params) {
+  return withCallTimeout(CALL_TIMEOUT_MS, "generateContent", (abortSignal, httpOptions) =>
+    client.models.generateContent({
+      ...params,
+      config: { ...(params.config || {}), abortSignal, httpOptions },
+    }),
+  );
+}
+
+function getFileWithTimeout(client, name) {
+  return withCallTimeout(CALL_TIMEOUT_MS, "files.get", (abortSignal, httpOptions) =>
+    client.files.get({ name, config: { abortSignal, httpOptions } }),
+  );
+}
+
+// files.upload gets NO httpOptions on purpose. In 2.19.0 fetchUploadUrl replaces its
+// whole default httpOptions (apiVersion '' plus the X-Goog-Upload-* resumable headers)
+// with whatever config.httpOptions holds, so passing { timeout } turned every upload into
+// a 404 on the local run of 2026-09-09. The abort signal is not threaded into the chunk
+// transfer either, so for uploads the race in withCallTimeout is the whole guard.
+function uploadFileWithTimeout(client, filePath, mimeType) {
+  return withCallTimeout(UPLOAD_TIMEOUT_MS, "files.upload", (abortSignal) =>
+    client.files.upload({ file: filePath, config: { mimeType, abortSignal } }),
+  );
+}
+
 function jsonConfig(systemPrompt, schemaHint) {
   return {
     systemInstruction: systemPrompt,
@@ -306,7 +410,7 @@ function parseJSON(text) {
 
 async function requestJSON(model, systemPrompt, contents, schemaHint, ai) {
   const run = async (client) => {
-    const response = await client.models.generateContent({
+    const response = await generateWithTimeout(client, {
       model,
       contents,
       config: jsonConfig(systemPrompt, schemaHint),
@@ -352,7 +456,7 @@ async function cachedUpload(ai, index, cacheKey) {
     return undefined;
   }
   try {
-    const fresh = await ai.files.get({ name: entry.file.name });
+    const fresh = await getFileWithTimeout(ai, entry.file.name);
     if (fresh?.state === "ACTIVE" && fresh.uri) {
       Object.defineProperty(fresh, FILE_CLIENT, { value: ai, enumerable: false });
       return fresh;
@@ -379,7 +483,7 @@ async function uploadWithClient(ai, filePath, index) {
   }
   const extension = path.extname(filePath).toLowerCase();
   const mimeType = extension === ".mov" ? "video/quicktime" : "video/mp4";
-  let file = await ai.files.upload({ file: filePath, config: { mimeType } });
+  let file = await uploadFileWithTimeout(ai, filePath, mimeType);
   for (let attempt = 0; attempt < FILE_POLL_ATTEMPTS; attempt += 1) {
     if (file.state === "ACTIVE") {
       Object.defineProperty(file, FILE_CLIENT, { value: ai, enumerable: false });
@@ -391,7 +495,7 @@ async function uploadWithClient(ai, filePath, index) {
       throw new Error("Gemini video processing failed.");
     }
     await new Promise((resolve) => setTimeout(resolve, FILE_POLL_MS));
-    file = await ai.files.get({ name: file.name });
+    file = await getFileWithTimeout(ai, file.name);
   }
   throw new Error("Gemini video processing timed out.");
 }
@@ -496,7 +600,7 @@ export async function analyzeVideo(
     stage("attempt", base);
     const file = await uploadWithClient(client, filePath, index);
     stage("analyzing", { ...base, reusedUpload: Boolean(file.reused) });
-    const response = await client.models.generateContent({
+    const response = await generateWithTimeout(client, {
       model,
       contents: videoContents(userPayload, file),
       config: jsonConfig(systemPrompt, schemaHint),
