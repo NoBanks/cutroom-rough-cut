@@ -159,6 +159,9 @@ async function probeFile(filePath, budgetMs, totalBudgetMs) {
   return {
     durationSec: Number.isFinite(duration) ? Number(duration.toFixed(2)) : 0,
     fps: parseRate(video?.r_frame_rate),
+    avgFps: parseRate(video?.avg_frame_rate),
+    frames: Number(video?.nb_frames) || 0,
+    videoDurationSec: Number(video?.duration) || 0,
     width: Number(video?.width) || 0,
     height: Number(video?.height) || 0,
     videoCodec: video?.codec_name || "unknown",
@@ -236,6 +239,9 @@ function videoFilters(canvas, sourceFps) {
     "format=yuv420p",
     "setrange=tv",
     "setsar=1",
+    // A source that runs out inside the span clones its last frame; -frames:v trims
+    // the surplus so the shot is exactly N frames either way.
+    `tpad=stop_mode=clone:stop_duration=${(SHOT_SLACK_FRAMES / TARGET_FPS).toFixed(4)}`,
   );
   return filters.join(",");
 }
@@ -257,10 +263,22 @@ function audioFilters(hasAudio, gainDb) {
 // frame makes ffprobe report a bogus r_frame_rate on the concatenated file
 // (120/1 was measured on 2026-09-04), which breaks the 24fps rule the whole
 // product is judged on. Do not remove this rounding.
-function frameAlignedDuration(seconds) {
-  const frames = Math.max(1, Math.round(seconds * TARGET_FPS));
-  return frames / TARGET_FPS;
+function frameCount(seconds) {
+  return Math.max(1, Math.round(seconds * TARGET_FPS));
 }
+
+function frameAlignedDuration(seconds) {
+  return frameCount(seconds) / TARGET_FPS;
+}
+
+// JOIN HOLE 2026-09-10: a shot whose span ends on the LAST frame of its clip came out
+// one frame short (the -ss seek landed a frame late and the source ran out) while its
+// AAC track ran the full length. The copy concat then started the next shot at the
+// audio length and left a 69ms video hole, so ffprobe reported 48000/1001 on the cut.
+// Every shot now gets two frames of input slack, clones its last frame if the source
+// runs dry, and is cut to EXACTLY N video frames; the concat list carries each shot's
+// frame-exact duration so the offsets never follow the audio overhang. Do not remove.
+const SHOT_SLACK_FRAMES = 2;
 
 function buildShotArgs(segment, canvas, outputPath) {
   // -ss goes BEFORE -i so ffmpeg seeks to the span instead of decoding the clip
@@ -276,7 +294,7 @@ function buildShotArgs(segment, canvas, outputPath) {
     "-ss",
     segment.startSec.toFixed(3),
     "-t",
-    segment.durationSec.toFixed(3),
+    (segment.durationSec + SHOT_SLACK_FRAMES / TARGET_FPS).toFixed(3),
     "-i",
     segment.sourcePath,
   ];
@@ -293,6 +311,8 @@ function buildShotArgs(segment, canvas, outputPath) {
   args.push(
     "-t",
     segment.durationSec.toFixed(3),
+    "-frames:v",
+    String(frameCount(segment.durationSec)),
     "-map",
     "0:v:0",
     "-map",
@@ -335,7 +355,6 @@ function buildShotArgs(segment, canvas, outputPath) {
     String(AUDIO_RATE),
     "-ac",
     "2",
-    "-shortest",
     outputPath,
   );
   return args;
@@ -431,7 +450,7 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
       remaining(),
       budgetMs,
     );
-    shotFiles.push(shotPath);
+    shotFiles.push({ path: shotPath, frames: frameCount(frameAlignedDuration(rawDuration)) });
     // A slow deployment box needs to show life instead of a silent wait.
     log(
       `shot ${index + 1}/${rows.length} done, ${((Date.now() - shotStartedAt) / 1000).toFixed(1)}s`,
@@ -442,7 +461,10 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
   await fs.writeFile(
     listPath,
     `${shotFiles
-      .map((file) => `file '${file.replaceAll("'", "'\\''")}'`)
+      .map(
+        (shot) =>
+          `file '${shot.path.replaceAll("'", "'\\''")}'\nduration ${(shot.frames / TARGET_FPS).toFixed(6)}`,
+      )
       .join("\n")}\n`,
     "utf8",
   );
@@ -473,10 +495,22 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
 
   const measured = await probeFile(outputPath, remaining(), budgetMs);
   const stats = await fs.stat(outputPath);
+  // The label comes from the frames actually in the file (nb_frames over the stream's
+  // duration), not from r_frame_rate, which ffprobe derives from the timestamp set and
+  // which doubles on a single one-frame hole. A disagreement is logged, never hidden.
+  const measuredFps =
+    measured.frames > 0 && measured.videoDurationSec > 0
+      ? Number((measured.frames / measured.videoDurationSec).toFixed(2))
+      : (measured.avgFps ?? measured.fps);
+  if (measured.fps !== null && measured.fps !== TARGET_FPS) {
+    log(
+      `warning: timestamp rate ${measured.fps}fps is not ${TARGET_FPS}fps, a shot boundary is not frame exact`,
+    );
+  }
   const fpsLabel =
-    measured.fps === null
+    measuredFps === null || !Number.isFinite(measuredFps)
       ? "fps unknown"
-      : `${Number.isInteger(measured.fps) ? measured.fps : measured.fps.toFixed(2)}fps`;
+      : `${Number.isInteger(measuredFps) ? measuredFps : measuredFps.toFixed(2)}fps`;
   log(
     `rough cut rendered: ${measured.durationSec}s, ${fpsLabel}, ${measured.height}p`,
   );
@@ -489,7 +523,7 @@ export async function runAssembly({ edl, clips, sessionDir, onLog }) {
     shots: rows.length,
     sizeBytes: stats.size,
     durationSec: measured.durationSec,
-    fps: measured.fps,
+    fps: measuredFps,
     width: measured.width,
     height: measured.height,
     videoCodec: measured.videoCodec,

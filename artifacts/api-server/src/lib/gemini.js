@@ -231,7 +231,16 @@ function isRejectedKey(error) {
 // Errors that belong to ONE key. Anything else is a real problem with the request and
 // is thrown straight up rather than replayed against twelve keys.
 function isKeyError(error) {
-  return isTransientError(error) || isRejectedKey(error);
+  return Boolean(error?.badAnswer) || isTransientError(error) || isRejectedKey(error);
+}
+
+// BAD ANSWER 2026-09-10: one empty or non-JSON answer from the fallback model ended a
+// review at attempt 4 of 20 in the judge cold run ("The reviewer could not watch this
+// cut."). A bad answer is now a per-attempt failure: it consumes budget and rotates to
+// the next key, but the key is NOT cooled, because the key did nothing wrong. Only the
+// attempt budget ends the request.
+function isBadAnswer(error) {
+  return Boolean(error?.badAnswer);
 }
 
 // A timeout counts as busy: the model did not answer inside the budget, which is the
@@ -288,6 +297,7 @@ function cleanError(source) {
 }
 
 function cooldownShape(error) {
+  if (isBadAnswer(error)) return "bad answer";
   if (isTimeout(error)) return `timed out after ${secondsLabel(error.timeoutMs)}`;
   if (isRejectedKey(error)) return "rejected";
   if (isDailyQuota(error)) return "daily quota";
@@ -343,6 +353,14 @@ async function withKeyRotation(attempt, options = {}) {
       if (!isKeyError(error)) throw error;
       if (typeof options.onRotate === "function") {
         options.onRotate(index, cooldownShape(error));
+      }
+      if (isBadAnswer(error)) {
+        // No cooling: the key answered, the model just answered badly. One line, no value.
+        console.warn(
+          `[gemini] ${keyLabel(index)} gave a bad answer (${error.message}), rotating to the next key.`,
+        );
+        busyInARow = 0;
+        continue;
       }
       markCooling(index, error);
       busyInARow = isModelBusy(error) ? busyInARow + 1 : 0;
@@ -605,7 +623,12 @@ export async function analyzeVideo(
       contents: videoContents(userPayload, file),
       config: jsonConfig(systemPrompt, schemaHint),
     });
-    return parseJSON(response.text);
+    try {
+      return parseJSON(response.text);
+    } catch (error) {
+      error.badAnswer = true;
+      throw error;
+    }
   };
   const rotation = {
     budget,
@@ -620,14 +643,21 @@ export async function analyzeVideo(
   } catch (firstError) {
     if (!isKeyError(firstError)) throw cleanError(firstError);
     if (firstError.attemptsExhausted) throw exhaustedError(firstError, budget);
-    try {
-      return await withKeyRotation(
-        (client, index, info) => attemptWith(client, index, info, FALLBACK_MODEL),
-        rotation,
-      );
-    } catch (secondError) {
-      if (secondError?.attemptsExhausted) throw exhaustedError(secondError, budget);
-      throw cleanError(secondError);
+    // The fallback pass repeats while budget remains: a pass that ended on a key error
+    // (bad answer, busy, rate limited) with attempts unused is not a reason to give up.
+    // Every pass consumes at least one attempt, so this ends by the budget at the latest.
+    for (;;) {
+      try {
+        return await withKeyRotation(
+          (client, index, info) => attemptWith(client, index, info, FALLBACK_MODEL),
+          rotation,
+        );
+      } catch (secondError) {
+        if (secondError?.attemptsExhausted) throw exhaustedError(secondError, budget);
+        if (!isKeyError(secondError) || budget.used >= budget.max) {
+          throw cleanError(secondError);
+        }
+      }
     }
   }
 }

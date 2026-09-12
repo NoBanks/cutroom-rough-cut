@@ -120,3 +120,65 @@ test("an upload that never resolves times out on its own budget and the next key
   assert.equal(hung.params.config.mimeType, "video/mp4");
   assert.equal(hung.params.config.abortSignal.aborted, true);
 });
+
+// FAILURE 1 from the 2026-09-10 judge cold run: the fallback model answered with an
+// empty body once and the reviewer died at attempt 4 of 20. A bad answer must consume
+// one attempt, rotate to the next key without cooling it, and the request must finish.
+function busy() {
+  const error = new Error("This model is currently experiencing high demand");
+  error.status = 503;
+  return error;
+}
+
+test("an empty answer from the fallback model rotates to the next key instead of failing", async () => {
+  process.env.GEMINI_API_KEYS = "stub-key-six,stub-key-seven";
+  const { primary, fallback } = gemini.getGeminiModels();
+  const activeFile = { name: "files/stub", state: "ACTIVE", uri: "https://example.invalid/files/stub", mimeType: "video/mp4" };
+  let liteCalls = 0;
+  stubPool({
+    // A fresh object per upload, like the SDK: the module pins the client onto it.
+    upload: () => Promise.resolve({ ...activeFile }),
+    get: () => Promise.resolve({ ...activeFile }),
+    generate: (key, params) => {
+      if (params.model === primary) return Promise.reject(busy());
+      liteCalls += 1;
+      return Promise.resolve(liteCalls === 1 ? { text: "" } : ANSWER);
+    },
+  });
+  const stages = [];
+  const { result, lines } = await captureWarnings(() =>
+    gemini.analyzeVideo(SAMPLE_CLIP, "system", undefined, "go", (stage, info) => {
+      if (stage === "attempt") stages.push(info);
+    }, { maxAttempts: 20 }),
+  );
+  assert.deepEqual(result, { ok: true });
+  assert.equal(stages.length, 4, "two busy primary attempts, one empty lite answer, one good lite answer");
+  assert.equal(stages[3].model, fallback);
+  assert.equal(stages[3].previous.shape, "bad answer");
+  assert.equal(stages[3].attempt, 4);
+  assert.ok(lines.some((line) => /gave a bad answer \(Gemini returned an empty response\.\)/.test(line)), lines.join("\n"));
+  assert.ok(!lines.some((line) => line.includes("stub-key")), "a key value leaked into a log line");
+  const status = gemini.getGeminiKeyPoolStatus();
+  assert.ok(JSON.stringify(status).length > 0);
+});
+
+test("bad answers on every attempt fail only when the budget is spent", async () => {
+  process.env.GEMINI_API_KEYS = "stub-key-eight,stub-key-nine";
+  const activeFile = { name: "files/stub", state: "ACTIVE", uri: "https://example.invalid/files/stub", mimeType: "video/mp4" };
+  stubPool({
+    // A fresh object per upload, like the SDK: the module pins the client onto it.
+    upload: () => Promise.resolve({ ...activeFile }),
+    get: () => Promise.resolve({ ...activeFile }),
+    generate: () => Promise.resolve({ text: "not json {" }),
+  });
+  const stages = [];
+  const { result } = await captureWarnings(() =>
+    gemini.analyzeVideo(SAMPLE_CLIP, "system", undefined, "go", (stage, info) => {
+      if (stage === "attempt") stages.push(info);
+    }, { maxAttempts: 5 }).then(() => undefined, (error) => error),
+  );
+  assert.ok(result instanceof Error, "expected a rejection");
+  assert.equal(result.attemptsExhausted, true);
+  assert.equal(result.attempts, 5);
+  assert.equal(stages.length, 5, "every one of the five attempts was used");
+});
