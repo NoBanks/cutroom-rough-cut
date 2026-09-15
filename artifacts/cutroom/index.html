@@ -97,6 +97,7 @@
             <div id="editor-log" class="editor-log"></div>
             <div id="assembly-log" class="assembly-log" aria-live="polite"></div>
             <div id="reviewer-log" class="reviewer-log" aria-live="polite"></div>
+            <div id="coverage-log" class="coverage-log" aria-live="polite"></div>
             <div id="roughcut-panel" class="roughcut-panel" hidden>
               <h3 id="cut-label" class="cut-label">Rough cut</h3>
               <video id="roughcut-player" class="roughcut-player" controls playsinline preload="metadata"></video>
@@ -111,6 +112,16 @@
               <div id="review-findings" class="review-findings"></div>
               <div id="review-orders" class="review-orders"></div>
             </section>
+            <section id="coverage-panel" class="coverage-panel" hidden>
+              <div class="moment-heading">
+                <h2>Tomorrow's pickups</h2>
+                <span id="coverage-count" class="moment-count"></span>
+              </div>
+              <p id="coverage-summary" class="coverage-summary"></p>
+              <div id="coverage-gaps" class="coverage-gaps"></div>
+              <div id="coverage-pickups" class="coverage-pickups"></div>
+              <p id="coverage-note" class="coverage-note"></p>
+            </section>
             <p id="directors-note" class="directors-note"></p>
             <p id="editor-summary" class="editor-summary"></p>
             <ul id="structure-notes" class="structure-notes"></ul>
@@ -119,6 +130,8 @@
               <a id="download-roughcut-v1" href="#" download="roughcut_v1.mp4" hidden>Download v1 MP4</a>
               <a id="download-edl-json" href="#" download="edl.json">Download JSON</a>
               <a id="download-edl-csv" href="#" download="edl.csv">Download CSV</a>
+              <a id="download-pickups" href="#" download="pickups.txt" hidden>Download pickup list</a>
+              <a id="download-coverage" href="#" download="coverage.json" hidden>Download coverage JSON</a>
             </div>
             <div class="moment-table-wrap">
               <table>
