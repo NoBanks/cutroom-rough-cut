@@ -48,6 +48,15 @@ document.addEventListener('DOMContentLoaded', () => {
     reviewFindings: document.getElementById('review-findings'),
     reviewOrders: document.getElementById('review-orders'),
     downloadRoughcutV1: document.getElementById('download-roughcut-v1'),
+    coverageLog: document.getElementById('coverage-log'),
+    coveragePanel: document.getElementById('coverage-panel'),
+    coverageCount: document.getElementById('coverage-count'),
+    coverageSummary: document.getElementById('coverage-summary'),
+    coverageGaps: document.getElementById('coverage-gaps'),
+    coveragePickups: document.getElementById('coverage-pickups'),
+    coverageNote: document.getElementById('coverage-note'),
+    downloadPickups: document.getElementById('download-pickups'),
+    downloadCoverage: document.getElementById('download-coverage'),
     downloadRoughcut: document.getElementById('download-roughcut'),
     unusedMoments: document.getElementById('unused-moments'),
     runFailure: document.getElementById('run-failure'),
@@ -359,11 +368,106 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // COVERAGE is the fifth chair: it reads the crew's census after the review and
+  // writes the pickup list for the next shoot. It never blocks the cut, so the panel
+  // simply appears when coverage.json lands.
+  function renderCoverage(data) {
+    const coverage = data?.coverageResult;
+    const ready = data?.coverageStatus === 'complete' && coverage;
+    elements.coveragePanel.hidden = !ready;
+    elements.downloadPickups.hidden = !ready;
+    elements.downloadCoverage.hidden = !ready;
+    if (!ready) return;
+
+    elements.downloadPickups.href =
+      `/api/session/pickups.txt?sessionId=${encodeURIComponent(sessionId)}`;
+    elements.downloadCoverage.href =
+      `/api/session/coverage.json?sessionId=${encodeURIComponent(sessionId)}`;
+
+    const gaps = Array.isArray(coverage.gaps) ? coverage.gaps : [];
+    const pickups = Array.isArray(coverage.pickups) ? coverage.pickups : [];
+    const roll = Math.ceil(Number(coverage.total_roll_sec) || 0);
+    elements.coverageCount.textContent = gaps.length
+      ? `${gaps.length} ${gaps.length === 1 ? 'gap' : 'gaps'} · ${pickups.length} ${pickups.length === 1 ? 'pickup' : 'pickups'} · roll about ${roll}s`
+      : 'no gaps';
+    elements.coverageSummary.textContent = coverage.coverage_summary || '';
+
+    elements.coverageGaps.replaceChildren();
+    if (gaps.length) {
+      const heading = document.createElement('h3');
+      heading.textContent = 'What the footage is missing';
+      elements.coverageGaps.appendChild(heading);
+      gaps.forEach(gap => {
+        const item = document.createElement('div');
+        item.className = `coverage-gap severity-${gap.severity || 'should'}`;
+        const title = document.createElement('p');
+        title.className = 'coverage-gap-title';
+        title.textContent = `${gap.gap_index}. ${String(gap.severity || '').toUpperCase()} · ${gap.gap_type} · ${gap.what_is_missing || ''}`;
+        item.appendChild(title);
+        if (gap.why_the_cut_needs_it) {
+          const why = document.createElement('p');
+          why.className = 'coverage-gap-line';
+          why.textContent = `why: ${gap.why_the_cut_needs_it}`;
+          item.appendChild(why);
+        }
+        if (gap.evidence) {
+          const evidence = document.createElement('p');
+          evidence.className = 'coverage-gap-line';
+          evidence.textContent = `evidence: ${gap.evidence}`;
+          item.appendChild(evidence);
+        }
+        elements.coverageGaps.appendChild(item);
+      });
+    }
+
+    elements.coveragePickups.replaceChildren();
+    if (pickups.length) {
+      const heading = document.createElement('h3');
+      heading.textContent = 'Shot list, most important first';
+      elements.coveragePickups.appendChild(heading);
+      const list = document.createElement('ol');
+      list.className = 'coverage-pickup-list';
+      pickups.forEach(pickup => {
+        const item = document.createElement('li');
+        item.className = 'coverage-pickup';
+        const title = document.createElement('p');
+        title.className = 'coverage-pickup-title';
+        const serves = pickup.serves_gap ? ` · gap ${pickup.serves_gap}` : '';
+        title.textContent = `${pickup.shot_size} · roll ${pickup.duration_sec}s${serves}`;
+        const shot = document.createElement('p');
+        shot.className = 'coverage-pickup-shot';
+        shot.textContent = pickup.shot || '';
+        item.append(title, shot);
+        const detail = [pickup.movement ? `movement: ${pickup.movement}` : '', pickup.camera_note ? `camera: ${pickup.camera_note}` : '']
+          .filter(Boolean)
+          .join(' · ');
+        if (detail) {
+          const line = document.createElement('p');
+          line.className = 'coverage-gap-line';
+          line.textContent = detail;
+          item.appendChild(line);
+        }
+        list.appendChild(item);
+      });
+      elements.coveragePickups.appendChild(list);
+    }
+
+    const skipped = Array.isArray(coverage.skipped) ? coverage.skipped : [];
+    if (skipped.length) {
+      appendFindingGroup(elements.coveragePickups, 'Left out by validation', skipped);
+    }
+    elements.coverageNote.textContent = coverage.next_shoot_note
+      ? `First hour tomorrow: ${coverage.next_shoot_note}`
+      : '';
+  }
+
   let roughcutLoadedFor = '';
 
   function renderAssembly(data) {
     renderLogLines(elements.assemblyLog, data?.assemblyLog, 'ASSEMBLY', 8);
     renderLogLines(elements.reviewerLog, data?.reviewerLog, 'REVIEWER', 12);
+    renderLogLines(elements.coverageLog, data?.coverageLog, 'COVERAGE', 6);
+    renderCoverage(data);
 
     elements.directorsNote.textContent = data?.directorsNote
       ? `Director's note: ${data.directorsNote}`
@@ -648,16 +752,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Assembly State Handlers ---
   let pollInterval;
-  
+  let coverageIdlePolls = 0;
+
+  // 2026-09-15 fix: the server sets status "completed" the moment assembly renders,
+  // BEFORE the reviewer and coverage chairs run. Stopping the poll on that first
+  // "completed" froze the page with no verdict and no pickups panel until a reload.
+  // Keep polling while either later chair is still working. Coverage sits at "idle"
+  // for a beat between the review settling and its own start, so allow a short grace
+  // window before treating an idle coverage as "never going to run".
+  function crewStillWorking(data) {
+    if (data?.reviewerStatus === 'running' || data?.coverageStatus === 'running') {
+      coverageIdlePolls = 0;
+      return true;
+    }
+    if (data?.assemblyStatus === 'complete' && data?.coverageStatus === 'idle') {
+      coverageIdlePolls += 1;
+      return coverageIdlePolls <= 5;
+    }
+    return false;
+  }
+
   function startStatusPolling() {
     if (pollInterval) clearInterval(pollInterval);
-    
+    coverageIdlePolls = 0;
+
     pollInterval = setInterval(async () => {
       try {
         const res = await fetch(`/api/session?sessionId=${sessionId}`);
         if (res.ok) {
           const data = await res.json();
-          if (data.status === 'completed') {
+          if (data.status === 'completed' && !crewStillWorking(data)) {
             clearInterval(pollInterval);
              renderSelector(data);
               renderDirector(data);
@@ -775,6 +899,11 @@ document.addEventListener('DOMContentLoaded', () => {
           switchState('assembly');
           if (data.status === 'error') {
             elements.logText.style.color = 'var(--error)';
+          }
+          // The reviewer or coverage chair may still be running after a reload;
+          // keep polling so the verdict and the pickups panel arrive on their own.
+          if (data.status === 'completed' && crewStillWorking(data)) {
+            startStatusPolling();
           }
           return;
         } else if (data.clipCount > 0) {

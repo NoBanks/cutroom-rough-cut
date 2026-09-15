@@ -880,3 +880,76 @@ textarea::placeholder {
     padding: 1.5rem 0.75rem;
   }
 }
+
+/* COVERAGE, the fifth chair (pickup list for the next shoot). */
+.coverage-log {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+  white-space: pre-wrap;
+}
+
+.coverage-panel {
+  border-top: 1px solid #333;
+  margin-bottom: 1.5rem;
+  padding-top: 1.25rem;
+}
+
+.coverage-summary,
+.coverage-note {
+  color: var(--magenta);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+}
+
+.coverage-gaps h3,
+.coverage-pickups h3 {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+}
+
+.coverage-gap,
+.coverage-pickup {
+  border-left: 2px solid #444;
+  margin-bottom: 0.8rem;
+  padding-left: 0.75rem;
+}
+
+.coverage-gap.severity-must {
+  border-left-color: var(--magenta);
+}
+
+.coverage-gap-title,
+.coverage-pickup-title {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin-bottom: 0.2rem;
+}
+
+.coverage-pickup-shot {
+  font-size: 0.92rem;
+  line-height: 1.5;
+  margin-bottom: 0.2rem;
+}
+
+.coverage-gap-line {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.coverage-pickup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
